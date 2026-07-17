@@ -5,7 +5,12 @@ let token = localStorage.getItem('multi-agent-token') || '';
 async function request(path, options = {}) {
   const headers = { 'Content-Type': 'application/json', ...(options.headers || {}) };
   if (token) headers.Authorization = `Bearer ${token}`;
-  const response = await fetch(`${BASE}${path}`, { ...options, headers });
+  let response;
+  try {
+    response = await fetch(`${BASE}${path}`, { ...options, headers });
+  } catch {
+    throw new Error('Backend indisponível. Confirme que a API está ativa na porta 8031 e tente novamente.');
+  }
   const data = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(data.detail || `HTTP ${response.status}`);
   return data;

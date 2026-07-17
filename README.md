@@ -15,6 +15,7 @@ If that sounds like a small thing, watch the demo. The moment you see a support 
 - **Retrieval is hybrid and native.** Product recommendations use `$vectorSearch` with automatic embedding (`voyage-4`); support articles use BM25 + vector search fused with Reciprocal Rank Fusion — both running as MongoDB aggregation pipelines, not a bolted-on search service.
 - **Security is ownership-first.** `customer_key` comes only from the JWT, never from the request body. Every order/invoice/shipment query is rebuilt from scratch server-side. Only one agent can write, and only to one field, from an approved list of values.
 - **A guardrail that gets smarter as it runs.** New manipulation attempts caught by an LLM classifier get written back into the fast deterministic denylist — the next similar attempt is blocked instantly, no LLM call needed. Ambiguous cases get flagged for human review instead of blocking a legitimate customer by mistake.
+- **A cache cascade with explicit trust boundaries.** Short-term memory is scoped by session + customer + agent; cross-session cache remains customer-scoped; only public catalog/KB answers with no personalized memory, handoff, or write can enter the global cache.
 - **An eval harness that lives in the same database.** A golden dataset of test conversations gets replayed against the live server and the pass/fail history is written to `eval_runs` — quality tracking as a MongoDB collection, not a separate dashboard.
 
 ## The 8 agents

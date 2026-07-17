@@ -13,8 +13,13 @@ flowchart LR
     ORC --> PA[product_agent]
     ORC --> SA[support_agent]
     ORC --> BA[billing_agent]
+    ORC --> WA[warranty_agent]
+    ORC --> LA[loyalty_agent]
+    ORC --> LG[logistics_agent]
     SA -->|handoff explícito| PA
-    OA & PA & SA & BA --> DATA[(multi_agent_poc)]
+    PA -->|ação de troca| OA
+    OA --> BA & LG
+    OA & PA & SA & BA & WA & LA & LG --> DATA[(multi_agent_poc)]
     ORC --> BRAIN[(ai_brain)]
     DATA --> TRACE[agent_handoffs + agent_traces]
 ```
@@ -53,11 +58,14 @@ sequenceDiagram
 - Filtros de pedido e fatura são reconstruídos do zero com ownership.
 - Somente `order_agent` recebe a ferramenta de escrita, limitada a `$set.status` e estados aprovados.
 - O plano `ai_brain` é alterado somente pelos endpoints administrativos.
-- Conversas são bounded a 20 mensagens e expiram em uma hora; eventos e auditoria expiram em 30 dias.
+- Conversas são bounded a 20 mensagens e expiram em 24 horas; eventos e auditoria expiram em 30 dias.
+- `conversation_id` e memória de curto prazo são validados junto com o `customer_key`; conhecer um ID não permite retomar ou sobrescrever a conversa de outro cliente.
 
 ## Retrieval
 
 - Catálogo: `autoEmbed` com `voyage-4`, `indexingMethod: flat` e filtros `active`, `category`, `price`.
 - Base de suporte: ranking vetorial e BM25 combinados com RRF.
 - Memória longa: um documento por fato, com `customer_key + active` no índice vetorial.
-- Cache: índice vetorial particionado por `agent + area + customer_key`; o terceiro filtro impede compartilhamento de respostas entre clientes da mesma área. A implementação também aceita hit exato para uma demonstração determinística.
+- Cache curto: índice vetorial particionado por `session_id + customer_key + agent`.
+- Cache entre sessões: documentos `scope=customer` sempre filtram `customer_key`.
+- Cache global: limitado a catálogo/KB sem memória personalizada, handoff ou escrita; garantia, pedido, cobrança, fidelidade e logística nunca são compartilhados entre clientes.

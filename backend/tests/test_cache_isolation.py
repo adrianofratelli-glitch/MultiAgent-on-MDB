@@ -1,10 +1,98 @@
-from app.agents import semantic_cache_get, semantic_cache_put
+from app.cascade import cascade_lookup, cascade_store_turn
 from app.config import Settings
 from app.database import DataStore
+from app.llm import LLMGateway
+from app.orchestration import OrchestrationService
 
 
-async def test_cache_does_not_leak_between_customers_in_same_area():
+async def test_personalized_intent_stays_session_scoped_and_never_leaks():
     store = DataStore(Settings(demo_mode=True))
-    await semantic_cache_put(store, "order_agent", "varejo", "ana", "pedido 1", "resposta da Ana", [])
-    assert await semantic_cache_get(store, "order_agent", "varejo", "ana", "pedido 1")
-    assert await semantic_cache_get(store, "order_agent", "varejo", "bruno", "pedido 1") is None
+    await cascade_store_turn(store, target="order_agent", area="varejo", customer_key="ana", session_id="s1", intent="status_pedido", message="onde está meu pedido", answer="resposta da Ana", timeline=[], active_agent="order_agent")
+
+    same_session = await cascade_lookup(store, target="order_agent", area="varejo", customer_key="ana", session_id="s1", message="onde está meu pedido")
+    assert same_session.hit and same_session.fonte == "curto_prazo"
+
+    other_session = await cascade_lookup(store, target="order_agent", area="varejo", customer_key="bruno", session_id="s2", message="onde está meu pedido")
+    assert other_session.hit is False
+
+
+async def test_short_term_cache_requires_customer_even_when_session_id_matches():
+    store = DataStore(Settings(demo_mode=True))
+    await cascade_store_turn(store, target="order_agent", area="varejo", customer_key="ana", session_id="shared-id", intent="status_pedido", message="onde está meu pedido", answer="resposta da Ana", timeline=[], active_agent="order_agent")
+
+    leaked = await cascade_lookup(store, target="order_agent", area="varejo", customer_key="bruno", session_id="shared-id", message="onde está meu pedido")
+    assert leaked.hit is False
+
+
+async def test_global_cache_requires_explicit_safe_eligibility():
+    store = DataStore(Settings(demo_mode=True))
+    await cascade_store_turn(store, target="support_agent", area="varejo", customer_key="ana", session_id="s1", intent="suporte", message="como parear bluetooth", answer="orientação pública", timeline=[], active_agent="support_agent")
+
+    without_approval = await cascade_lookup(store, target="support_agent", area="varejo", customer_key="bruno", session_id="s2", message="como parear bluetooth")
+    assert without_approval.hit is False
+
+    await cascade_store_turn(store, target="support_agent", area="varejo", customer_key="ana", session_id="s1", intent="suporte", message="como redefinir bluetooth", answer="orientação pública", timeline=[], active_agent="support_agent", global_eligible=True)
+    approved = await cascade_lookup(store, target="support_agent", area="varejo", customer_key="bruno", session_id="s2", message="como redefinir bluetooth")
+    assert approved.hit and approved.fonte == "cache"
+
+
+async def test_warranty_is_never_global_even_when_caller_requests_it():
+    store = DataStore(Settings(demo_mode=True))
+    await cascade_store_turn(store, target="warranty_agent", area="varejo", customer_key="ana", session_id="s1", intent="garantia", message="meu pedido está na garantia?", answer="resposta da Ana", timeline=[], active_agent="warranty_agent", global_eligible=True)
+
+    leaked = await cascade_lookup(store, target="warranty_agent", area="varejo", customer_key="bruno", session_id="s2", message="meu pedido está na garantia?")
+    assert leaked.hit is False
+
+
+async def test_foreign_conversation_id_is_replaced_instead_of_hijacked():
+    settings = Settings(demo_mode=True, anthropic_api_key="")
+    store = DataStore(settings)
+    await store.insert_one(
+        "agent_registry",
+        {
+            "agent_key": "order_agent",
+            "label": "Pedidos",
+            "model": "demo",
+            "persona": "Pedidos",
+            "allowed_tools": ["read_order"],
+            "max_turn_tokens": 1000,
+            "active": True,
+        },
+        brain=True,
+    )
+    await store.insert_one(
+        "routing_rules",
+        {"intent": "status_pedido", "keywords": ["PED-"], "target_agent": "order_agent", "priority": 100},
+        brain=True,
+    )
+    await store.insert_one(
+        "orders",
+        {
+            "order_id": "PED-2001",
+            "owner_customer_key": "bruno",
+            "product": "Monitor",
+            "status": "processando",
+            "timeline": [],
+        },
+    )
+    await store.insert_one(
+        "agent_conversations",
+        {
+            "conversation_id": "conv-da-ana",
+            "customer_key": "ana",
+            "turns": [{"role": "user", "content": "segredo da Ana"}],
+            "active_agent": "order_agent",
+        },
+    )
+
+    service = OrchestrationService(store, LLMGateway(settings), global_budget=6000)
+    response = await service.run_turn(
+        "PED-2001",
+        {"customer_key": "bruno", "area": "varejo", "name": "Bruno", "plan": "essencial"},
+        "conv-da-ana",
+    )
+
+    assert response.conversation_id != "conv-da-ana"
+    original = await store.find_one("agent_conversations", {"conversation_id": "conv-da-ana"})
+    assert original["customer_key"] == "ana"
+    assert original["turns"][0]["content"] == "segredo da Ana"

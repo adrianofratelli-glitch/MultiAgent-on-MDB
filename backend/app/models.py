@@ -51,6 +51,8 @@ class ChatResponse(BaseModel):
     active_agent: str
     route_source: Literal["rules", "orchestrator", "fallback", "fanout"]
     cache_hit: bool
+    cache_source: Literal["curto_prazo", "cache"] | None = None
+    tokens_economizados: int = 0
     timeline: list[TimelineEvent]
     usage: dict[str, int]
 

@@ -17,7 +17,14 @@ Usar MongoDB Atlas como plano de dados e de coordenação:
 - `agent_handoffs` e `agent_traces` são eventos independentes e consultáveis;
 - dados operacionais, memória longa, cache e guardrails mantêm filtros de tenant nos próprios documentos e índices.
 
-O orquestrador não responde ao cliente. Casos inequívocos não pagam uma chamada de modelo; ambiguidades passam pelo orquestrador. Um agente pode transferir uma vez e o turno percorre no máximo dois agentes.
+O orquestrador não responde ao cliente. Casos inequívocos não pagam uma chamada de modelo; ambiguidades passam pelo orquestrador. Um turno percorre no máximo quatro agentes, com detecção de ciclo. Perguntas compostas independentes de pedido + fatura usam fan-out paralelo; cadeias com dependência continuam sequenciais.
+
+Antes de chamar um modelo, a aplicação consulta uma cascata de memória:
+
+- memória de curto prazo isolada por `session_id + customer_key + agent`;
+- cache semântico do próprio cliente, reutilizável entre sessões;
+- cache global somente para respostas comprovadamente públicas de catálogo/KB, sem memória do cliente, handoff ou escrita;
+- memória de longo prazo do cliente como contexto, nunca como resposta pronta.
 
 ## Por que multi-agente aqui
 
@@ -30,7 +37,7 @@ A configuração muda com mais frequência que o código e precisa ser inspecion
 ## Consequências
 
 - A colaboração pode ser consultada por `conversation_id` e agregada por agente.
+- Um `conversation_id` só é retomado pelo titular autenticado; IDs alheios ou desconhecidos geram uma nova conversa.
 - TTL cuida do ciclo de vida operacional sem jobs externos.
 - O fallback local de RRF funciona em versões anteriores; Atlas 8.0+ pode mover a fusão para `$rankFusion`.
 - Em escala maior, revisitaremos particionamento de traces, arquivamento e Change Streams para consumidores assíncronos. Uma fila só será adicionada quando existir trabalho assíncrono real, não para representar handoff síncrono.
-

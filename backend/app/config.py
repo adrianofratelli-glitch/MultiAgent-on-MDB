@@ -33,9 +33,23 @@ class Settings(BaseSettings):
     app_name: str = "multi-agent-poc"
     environment: str = Field(default="development", alias="ENVIRONMENT")
 
+    # Calibrado contra o índice real (voyage-4, quantização escalar): texto idêntico só chega a ~0.84 de
+    # score, não 1.0 — um threshold de 0.85+ nunca bateria nem no caso trivial. Não-relacionado mede ~0.64,
+    # então a folga real é ~0.20, não os 0.15/0.07 que os números "de catálogo" 0.85/0.93 sugeriam.
+    short_term_cache_threshold: float = 0.80
+    global_cache_threshold: float = 0.83
+    long_term_memory_limit: int = 5
+    langfuse_public_key: str = ""
+    langfuse_secret_key: str = ""
+    langfuse_host: str = "https://cloud.langfuse.com"
+
     @property
     def use_memory_store(self) -> bool:
         return self.demo_mode or not self.mongodb_uri
+
+    @property
+    def langfuse_enabled(self) -> bool:
+        return bool(self.langfuse_public_key and self.langfuse_secret_key)
 
     @property
     def cors_origin_list(self) -> list[str]:

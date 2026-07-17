@@ -161,6 +161,14 @@ class DataStore:
                 target.setdefault(key, []).append(copy.deepcopy(value))
             return 1
 
+    async def aggregate(self, name: str, pipeline: list[dict], *, brain: bool = False) -> list[dict]:
+        """Só para pipelines reais ($vectorSearch/$unionWith) — sem equivalente em DEMO_MODE, chamador
+        precisa ter um caminho alternativo quando self.memory é True (ver cascade.py)."""
+        if self.memory:
+            raise RuntimeError("aggregate() não tem fallback em DEMO_MODE — trate store.memory antes de chamar")
+        cursor = await self._collection(name, brain).aggregate(pipeline)
+        return await cursor.to_list(length=None)
+
     async def delete_many(self, name: str, query: dict, *, brain: bool = False) -> int:
         if not self.memory:
             result = await self._collection(name, brain).delete_many(query)
@@ -261,6 +269,8 @@ class DataStore:
             "agent_handoffs": [[("conversation_id", ASCENDING), ("at", ASCENDING)], [("at", ASCENDING)]],
             "agent_traces": [[("conversation_id", ASCENDING), ("at", ASCENDING)], [("at", ASCENDING)]],
             "semantic_cache": [[("agent", ASCENDING), ("area", ASCENDING)], [("expires_at", ASCENDING)]],
+            "short_term_memory": [[("session_id", ASCENDING)], [("expires_at", ASCENDING)]],
+            "long_term_memory": [[("customer_key", ASCENDING)]],
             "guardrail_denylist": [[("phrase_norm", ASCENDING)]],
             "guardrail_events": [[("at", ASCENDING)]],
             "guardrail_candidates": [[("status", ASCENDING), ("created_at", ASCENDING)]],
@@ -275,6 +285,7 @@ class DataStore:
             ("agent_handoffs", 1): 30 * 86400,
             ("agent_traces", 1): 30 * 86400,
             ("semantic_cache", 1): 0,
+            ("short_term_memory", 1): 0,
             ("guardrail_events", 0): 30 * 86400,
             ("admin_audit", 0): 30 * 86400,
             ("eval_runs", 0): 90 * 86400,

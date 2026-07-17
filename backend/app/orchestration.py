@@ -2,10 +2,12 @@ import asyncio
 import uuid
 from time import perf_counter
 
-from .agents import RUNNERS, semantic_cache_get, semantic_cache_put
-from .budget import BudgetExceeded, TurnBudget, estimate_tokens
+from .agents import RUNNERS
+from .budget import TurnBudget, estimate_tokens
+from .cascade import cascade_long_term_context, cascade_lookup, cascade_store_turn
 from .database import DataStore, utcnow
 from .guardrails import check_input, check_output
+from .langfuse_client import log_cache_decision
 from .llm import LLMGateway
 from .memory import extract_and_store
 from .metrics import metrics
@@ -42,7 +44,8 @@ class OrchestrationService:
 
     async def run_turn(self, message: str, customer: dict, conversation_id: str | None) -> ChatResponse:
         started = perf_counter()
-        conversation_id = conversation_id or f"conv-{uuid.uuid4().hex[:12]}"
+        requested_conversation_id = conversation_id
+        conversation_id = requested_conversation_id or f"conv-{uuid.uuid4().hex[:12]}"
         masked = mask_pii(message)
         timeline: list[TimelineEvent] = []
 
@@ -52,6 +55,10 @@ class OrchestrationService:
             self.store.find_many("customer_memory", {"customer_key": customer["customer_key"], "active": True}, limit=5),
             self.store.find_one("agent_conversations", {"conversation_id": conversation_id, "customer_key": customer["customer_key"]}),
         )
+        # Um ID fornecido só pode retomar uma conversa que pertence ao JWT atual. IDs desconhecidos ou de
+        # outro cliente viram uma conversa nova; isso evita leitura de cache e overwrite por ID adivinhado.
+        if requested_conversation_id and conversation is None:
+            conversation_id = f"conv-{uuid.uuid4().hex[:12]}"
         registry = {agent["agent_key"]: agent for agent in agents}
         per_agent = {key: int(value["max_turn_tokens"]) for key, value in registry.items()}
         budget = TurnBudget(self.global_budget, per_agent)
@@ -118,19 +125,35 @@ class OrchestrationService:
             route_source = "fallback"
         timeline.append(TimelineEvent(category="agent", title="Roteamento inicial", agent=target, collection="ai_brain.routing_rules" if decision.source == "rules" else "ai_brain.agent_registry", op="read", filter={"intent": decision.intent}, result={"target_agent": target, "source": route_source, "confidence": decision.confidence}))
 
-        cached = await semantic_cache_get(self.store, target, customer["area"], customer["customer_key"], masked)
-        if cached:
+        cascade = await cascade_lookup(self.store, target=target, area=customer["area"], customer_key=customer["customer_key"], session_id=conversation_id, message=masked)
+        if cascade.hit:
             await metrics.increment(f"agent.{target}.cache_hits")
-            timeline.append(TimelineEvent(category="cache", title="Cache semântico do agente", agent=target, collection="semantic_cache", op="read", filter={"agent": target, "area": customer["area"], "customer_key": customer["customer_key"]}, result={"hit": True}))
-            response = cached["answer"]
-            cached_active_agent = cached.get("active_agent", target)
-            cached_timeline = timeline + [TimelineEvent(**event) for event in cached.get("timeline", [])]
-            await self._update_conversation(conversation_id, customer, conversation, masked, response, cached_active_agent, [])
+            await metrics.increment(f"cache.hits.{cascade.fonte}")
+            timeline.append(TimelineEvent(category="cache", title=f"Cascata semântica: HIT ({cascade.fonte})", agent=target, collection="short_term_memory" if cascade.fonte == "curto_prazo" else "semantic_cache", op="vectorSearch", filter={"session_id": conversation_id, "agent": target}, result={"hit": True, "fonte": cascade.fonte, "score": cascade.score}))
+            response = cascade.answer or ""
+            cached_active_agent = cascade.active_agent or target
+            cached_timeline = timeline + [TimelineEvent(**event) for event in cascade.timeline]
+            log_cache_decision(conversation_id=conversation_id, customer_key=customer["customer_key"], message=masked, cache="hit", fonte=cascade.fonte, score=cascade.score, tokens_economizados=cascade.tokens_economizados, memorias_recuperadas=0, response=response)
+            await self._update_conversation(conversation_id, customer, conversation, masked, response, cached_active_agent, [], cached_timeline)
             await self._persist_trace(conversation_id, customer, masked, response, cached_timeline, cached_active_agent, {})
             await _record_collection_metrics(cached_timeline)
-            return ChatResponse(conversation_id=conversation_id, response=response, active_agent=cached_active_agent, route_source=route_source, cache_hit=True, timeline=cached_timeline, usage={})
-        timeline.append(TimelineEvent(category="cache", title="Cache semântico do agente", agent=target, collection="semantic_cache", op="read", filter={"agent": target, "area": customer["area"], "customer_key": customer["customer_key"]}, result={"hit": False}))
+            return ChatResponse(conversation_id=conversation_id, response=response, active_agent=cached_active_agent, route_source=route_source, cache_hit=True, cache_source=cascade.fonte, tokens_economizados=cascade.tokens_economizados, timeline=cached_timeline, usage={})
+        timeline.append(TimelineEvent(category="cache", title="Cascata semântica: MISS (curto prazo + cache global)", agent=target, collection="short_term_memory", op="vectorSearch", filter={"session_id": conversation_id, "agent": target}, result={"hit": False}))
+        long_term = await cascade_long_term_context(self.store, customer_key=customer["customer_key"], message=masked)
+        if long_term:
+            timeline.append(TimelineEvent(category="memory", title="Memória de longo prazo recuperada (contexto pro prompt)", agent=target, collection="long_term_memory", op="vectorSearch", filter={"customer_key": customer["customer_key"]}, result={"count": len(long_term)}))
         tail_start = len(timeline)
+
+        long_term_hint = (
+            " Contexto de longo prazo sobre este cliente (memória semântica/episódica, não é resposta pronta, "
+            "use só como pano de fundo): " + " | ".join(str(item.get("text", "")) for item in long_term)
+        ) if long_term else ""
+        recent_turns = (conversation or {}).get("turns", [])[-6:]
+        history_hint = (
+            " Histórico real desta conversa até agora, na ordem em que aconteceu (se o cliente perguntar "
+            "o que ele já disse/perguntou antes, responda com base nisso, nunca diga que não tem registro): "
+            + " | ".join(f"{item['role']}: {item['content']}" for item in recent_turns)
+        ) if recent_turns else ""
 
         budget.reserve(target, estimate_tokens(masked))
         handoff_chain: list[dict] = []
@@ -142,7 +165,8 @@ class OrchestrationService:
             if not runner:
                 break
             await metrics.increment(f"agent.{current}.turns")
-            result = await runner(self.store, masked, customer, self.llm, budget, registry.get(current))
+            turn_context = {"active_order_id": (conversation or {}).get("active_order_id"), "active_invoice_id": (conversation or {}).get("active_invoice_id")}
+            result = await runner(self.store, masked, customer, self.llm, budget, registry.get(current), (history_hint + long_term_hint) if hop == 0 else "", turn_context)
             timeline.append(result.event)
             timeline.extend(result.extra_events)
             responses.append(result.response)
@@ -171,22 +195,61 @@ class OrchestrationService:
         if output_guardrail.blocked:
             response = "A resposta foi retida pela política de segurança."
 
-        await semantic_cache_put(self.store, target, customer["area"], customer["customer_key"], masked, response, [event.model_dump(mode="json") for event in timeline[tail_start:]], active_agent=current)
-        await self._update_conversation(conversation_id, customer, conversation, masked, response, current, handoff_chain)
+        turn_tail = timeline[tail_start:]
+        global_eligible = (
+            not memory
+            and not written_facts
+            and not long_term
+            and not handoff_chain
+            and current == target
+            and all(event.op != "write" for event in turn_tail)
+        )
+        await cascade_store_turn(
+            self.store,
+            target=target,
+            area=customer["area"],
+            customer_key=customer["customer_key"],
+            session_id=conversation_id,
+            intent=decision.intent,
+            message=masked,
+            answer=response,
+            timeline=[event.model_dump(mode="json") for event in turn_tail],
+            active_agent=current,
+            global_eligible=global_eligible,
+        )
+        await self._update_conversation(conversation_id, customer, conversation, masked, response, current, handoff_chain, timeline)
         usage = {**budget.used_by_agent, "total": budget.total_used}
         await metrics.increment("tokens.total", budget.total_used)
+        await metrics.increment("cache.misses")
+        log_cache_decision(conversation_id=conversation_id, customer_key=customer["customer_key"], message=masked, cache="miss", fonte=None, score=None, tokens_economizados=0, memorias_recuperadas=len(long_term), response=response, usage=usage)
         await self._persist_trace(conversation_id, customer, masked, response, timeline, current, usage, (perf_counter() - started) * 1000)
         await _record_collection_metrics(timeline)
-        return ChatResponse(conversation_id=conversation_id, response=response, active_agent=current, route_source=route_source, cache_hit=False, timeline=timeline, usage=usage)
+        return ChatResponse(conversation_id=conversation_id, response=response, active_agent=current, route_source=route_source, cache_hit=False, cache_source=None, tokens_economizados=0, timeline=timeline, usage=usage)
 
     async def _run_fanout(self, targets: list[str], masked: str, customer: dict, registry: dict, budget: TurnBudget, conversation_id: str, conversation: dict | None, timeline: list[TimelineEvent], started: float) -> ChatResponse:
         """Pattern Parallel Fan-Out/Synthesis: agentes independentes rodam ao mesmo tempo (asyncio.gather), não
         em cadeia — cobre pedidos compostos tipo 'status do pedido e quanto devo' sem pagar 2 turnos de latência."""
+        fanout_key = "+".join(targets)
+        cascade = await cascade_lookup(self.store, target=fanout_key, area=customer["area"], customer_key=customer["customer_key"], session_id=conversation_id, message=masked)
+        if cascade.hit:
+            await metrics.increment(f"cache.hits.{cascade.fonte}")
+            timeline.append(TimelineEvent(category="cache", title=f"Cascata semântica: HIT ({cascade.fonte})", collection="short_term_memory" if cascade.fonte == "curto_prazo" else "semantic_cache", op="vectorSearch", filter={"session_id": conversation_id, "agent": fanout_key}, result={"hit": True, "fonte": cascade.fonte, "score": cascade.score}))
+            response = cascade.answer or ""
+            cached_active_agent = cascade.active_agent or fanout_key
+            cached_timeline = timeline + [TimelineEvent(**event) for event in cascade.timeline]
+            log_cache_decision(conversation_id=conversation_id, customer_key=customer["customer_key"], message=masked, cache="hit", fonte=cascade.fonte, score=cascade.score, tokens_economizados=cascade.tokens_economizados, memorias_recuperadas=0, response=response)
+            await self._update_conversation(conversation_id, customer, conversation, masked, response, cached_active_agent, [], cached_timeline)
+            await self._persist_trace(conversation_id, customer, masked, response, cached_timeline, cached_active_agent, {})
+            await _record_collection_metrics(cached_timeline)
+            return ChatResponse(conversation_id=conversation_id, response=response, active_agent=cached_active_agent, route_source="fanout", cache_hit=True, cache_source=cascade.fonte, tokens_economizados=cascade.tokens_economizados, timeline=cached_timeline, usage={})
+        timeline.append(TimelineEvent(category="cache", title="Cascata semântica: MISS (curto prazo + cache global)", collection="short_term_memory", op="vectorSearch", filter={"session_id": conversation_id, "agent": fanout_key}, result={"hit": False}))
+        tail_start = len(timeline)
         timeline.append(TimelineEvent(category="fanout", title="Despacho paralelo", collection="ai_brain.routing_rules", op="read", filter={"targets": targets}, result={"agents": targets}))
         for target in targets:
             budget.reserve(target, estimate_tokens(masked))
             await metrics.increment(f"agent.{target}.turns")
         area_labels = {"order_agent": "pedido/entrega", "billing_agent": "fatura/pagamento"}
+        turn_context = {"active_order_id": (conversation or {}).get("active_order_id"), "active_invoice_id": (conversation or {}).get("active_invoice_id")}
         results = await asyncio.gather(*[
             RUNNERS[target](
                 self.store, masked, customer, self.llm, budget, registry.get(target),
@@ -195,6 +258,7 @@ class OrchestrationService:
                 f"Comece direto pela resposta sobre {area_labels.get(target, target)}. NÃO escreva nenhuma frase "
                 f"sobre o outro assunto, nem para dizer que não tem acesso — apague esse pensamento, apenas não "
                 f"mencione o outro tema em nenhuma hipótese.",
+                turn_context,
             )
             for target in targets
         ])
@@ -207,20 +271,39 @@ class OrchestrationService:
         timeline.append(TimelineEvent(category="guardrail", title="Guardrail de saída", result={"blocked": output_guardrail.blocked}))
         if output_guardrail.blocked:
             response = "A resposta foi retida pela política de segurança."
-        current = "+".join(targets)
-        await self._update_conversation(conversation_id, customer, conversation, masked, response, current, [])
+        current = fanout_key
+        await cascade_store_turn(self.store, target=fanout_key, area=customer["area"], customer_key=customer["customer_key"], session_id=conversation_id, intent=None, message=masked, answer=response, timeline=[event.model_dump(mode="json") for event in timeline[tail_start:]], active_agent=current)
+        await self._update_conversation(conversation_id, customer, conversation, masked, response, current, [], timeline)
         usage = {**budget.used_by_agent, "total": budget.total_used}
         await metrics.increment("tokens.total", budget.total_used)
         await metrics.increment("fanout.turns")
+        await metrics.increment("cache.misses")
+        log_cache_decision(conversation_id=conversation_id, customer_key=customer["customer_key"], message=masked, cache="miss", fonte=None, score=None, tokens_economizados=0, memorias_recuperadas=0, response=response, usage=usage)
         await self._persist_trace(conversation_id, customer, masked, response, timeline, current, usage, (perf_counter() - started) * 1000)
         await _record_collection_metrics(timeline)
-        return ChatResponse(conversation_id=conversation_id, response=response, active_agent=current, route_source="fanout", cache_hit=False, timeline=timeline, usage=usage)
+        return ChatResponse(conversation_id=conversation_id, response=response, active_agent=current, route_source="fanout", cache_hit=False, cache_source=None, tokens_economizados=0, timeline=timeline, usage=usage)
 
-    async def _update_conversation(self, conversation_id: str, customer: dict, existing: dict | None, message: str, response: str, active_agent: str, handoffs: list[dict]) -> None:
+    async def _update_conversation(self, conversation_id: str, customer: dict, existing: dict | None, message: str, response: str, active_agent: str, handoffs: list[dict], timeline: list[TimelineEvent] | None = None) -> None:
         turns = list((existing or {}).get("turns", []))[-18:]
         turns.extend([{"role": "user", "content": message, "at": utcnow()}, {"role": "assistant", "content": response, "at": utcnow()}])
         chain = list((existing or {}).get("handoff_chain", []))[-18:] + [{key: value for key, value in item.items() if key != "conversation_id"} for item in handoffs]
-        await self.store.replace_one("agent_conversations", {"conversation_id": conversation_id}, {"conversation_id": conversation_id, "customer_key": customer["customer_key"], "turns": turns, "active_agent": active_agent, "handoff_chain": chain[-20:], "updated_at": utcnow()}, upsert=True)
+        # "pedido/fatura ativo": último order_id/invoice_id que um agente de fato tocou neste turno — é o que
+        # order_agent/billing_agent/warranty_agent/logistics_agent usam como contexto no PRÓXIMO turno quando
+        # a mensagem não cita um PED-/FAT- explícito. Checa por chave no result, não por nome de collection —
+        # warranty_agent grava em warranty_policies e logistics_agent em shipments, ambos carregando order_id.
+        active_order_id = (existing or {}).get("active_order_id")
+        active_invoice_id = (existing or {}).get("active_invoice_id")
+        for event in timeline or []:
+            if isinstance(event.result, dict) and event.result.get("order_id"):
+                active_order_id = event.result["order_id"]
+            if isinstance(event.result, dict) and event.result.get("invoice_id"):
+                active_invoice_id = event.result["invoice_id"]
+        await self.store.replace_one(
+            "agent_conversations",
+            {"conversation_id": conversation_id, "customer_key": customer["customer_key"]},
+            {"conversation_id": conversation_id, "customer_key": customer["customer_key"], "turns": turns, "active_agent": active_agent, "handoff_chain": chain[-20:], "active_order_id": active_order_id, "active_invoice_id": active_invoice_id, "updated_at": utcnow()},
+            upsert=True,
+        )
 
     async def _persist_trace(self, conversation_id: str, customer: dict, message: str, response: str, timeline: list[TimelineEvent], active_agent: str, usage: dict, duration_ms: float = 0) -> None:
         await self.store.insert_one("agent_traces", {"conversation_id": conversation_id, "customer_key": customer["customer_key"], "area": customer["area"], "message": message, "response": response, "active_agent": active_agent, "timeline": [event.model_dump(mode="python") for event in timeline], "usage": usage, "duration_ms": round(duration_ms, 2), "at": utcnow()})

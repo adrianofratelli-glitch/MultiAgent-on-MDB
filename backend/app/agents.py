@@ -54,24 +54,18 @@ def extract_id(message: str, prefix: str) -> str | None:
     return match.group(0) if match else None
 
 
-async def semantic_cache_get(
-    store: DataStore, agent: str, area: str, customer_key: str, message: str
-) -> dict | None:
-    return await store.find_one(
-        "semantic_cache",
-        {"agent": agent, "area": area, "customer_key": customer_key, "question_norm": normalize(message), "expires_at": {"$gt": utcnow()}},
-    )
+_TRIVIAL_WORD_RE = re.compile(r"[a-zA-ZÀ-ÿ0-9\-]+")
 
 
-async def semantic_cache_put(
-    store: DataStore, agent: str, area: str, customer_key: str, message: str, answer: str, timeline: list[dict], active_agent: str | None = None
-) -> None:
-    await store.replace_one(
-        "semantic_cache",
-        {"agent": agent, "area": area, "customer_key": customer_key, "question_norm": normalize(message)},
-        {"agent": agent, "area": area, "customer_key": customer_key, "question_norm": normalize(message), "answer": answer, "timeline": timeline, "active_agent": active_agent or agent, "created_at": utcnow(), "expires_at": utcnow() + timedelta(minutes=60)},
-        upsert=True,
-    )
+def _is_trivial_lookup(message: str, *tokens: str | None, max_words: int = 0) -> bool:
+    """Modo econômico: pula a chamada real ao Anthropic quando a mensagem é só o identificador (ou quase
+    nada além dele) — cobre uso automatizado/script (ex.: só 'PED-1001'), NUNCA os prompts de demo reais
+    (DEMOS_BY_IDENTITY), que são sempre frase natural composta e por isso nunca ficam abaixo do threshold.
+    Preserva a proposta de valor da PoV (LLM cobre qualquer forma de perguntar) — só economiza no caso trivial
+    que nenhuma demo real produz."""
+    excluded = {token.upper() for token in tokens if token}
+    words = [word for word in _TRIVIAL_WORD_RE.findall(message) if word.upper() not in excluded]
+    return len(words) <= max_words
 
 
 _STATUS_INTENTS = (
@@ -88,13 +82,19 @@ def _requested_status(message: str) -> str | None:
     return None
 
 
-async def run_order_agent(store: DataStore, message: str, customer: dict, llm=None, budget=None, agent_doc=None, scope_hint: str = "") -> AgentResult:
+async def run_order_agent(store: DataStore, message: str, customer: dict, llm=None, budget=None, agent_doc=None, scope_hint: str = "", context: dict | None = None) -> AgentResult:
     started = perf_counter()
-    order_id = extract_id(message, "PED")
+    explicit_order_id = extract_id(message, "PED")
+    order_id = explicit_order_id or (context or {}).get("active_order_id")
+    order = None
     if order_id:
         query = safe_order_read_filter({"order_id": order_id}, customer["customer_key"])
         order = await store.find_one("orders", query)
-    else:
+    if not order and not explicit_order_id:
+        # só cai pro "pedido mais recente" quando NÃO havia PED- explícito na mensagem (nem no contexto
+        # ativo da conversa) — um PED- citado errado/de outro cliente tem que dar "não encontrei", nunca
+        # silenciosamente resolver outro pedido (isolamento). Sem PED- nenhum e sem contexto ativo, aí sim
+        # o fallback por "mais recente" é a única opção razoável.
         query = {"owner_customer_key": customer["customer_key"]}
         orders = await store.find_many("orders", query, limit=1, sort=[("order_id", -1)])
         order = orders[0] if orders else None
@@ -131,18 +131,22 @@ async def run_order_agent(store: DataStore, message: str, customer: dict, llm=No
             return AgentResult(response, event, "logistics_agent", "cliente quer saber o rastreio/transportadora após a troca")
         return AgentResult(response, event)
     response = f"O pedido {clean['order_id']} de {clean['product']} está com status **{clean['status']}**."
-    synthesized = await llm_synthesize(llm, agent_doc, budget, message, clean, "O cliente pode perguntar qualquer coisa sobre este pedido específico (prazo, status, itens, timeline) — responda com base no documento acima." + scope_hint)
-    event = TimelineEvent(category="agent", title="Consulta segura de pedido" + (" (resposta sintetizada pelo modelo)" if synthesized else ""), agent="order_agent", collection="orders", op="read", filter=query, result=clean, duration_ms=(perf_counter() - started) * 1000)
+    trivial = _is_trivial_lookup(message, order_id)
+    synthesized = None if trivial else await llm_synthesize(llm, agent_doc, budget, message, clean, "O cliente pode perguntar qualquer coisa sobre este pedido específico (prazo, status, itens, timeline) — responda com base no documento acima." + scope_hint)
+    title = "Consulta segura de pedido" + (" (resposta sintetizada pelo modelo)" if synthesized else " (modo econômico, sem chamada ao modelo)" if trivial else "")
+    event = TimelineEvent(category="agent", title=title, agent="order_agent", collection="orders", op="read", filter=query, result=clean, duration_ms=(perf_counter() - started) * 1000)
     return AgentResult(synthesized or response, event)
 
 
-async def run_billing_agent(store: DataStore, message: str, customer: dict, llm=None, budget=None, agent_doc=None, scope_hint: str = "") -> AgentResult:
+async def run_billing_agent(store: DataStore, message: str, customer: dict, llm=None, budget=None, agent_doc=None, scope_hint: str = "", context: dict | None = None) -> AgentResult:
     started = perf_counter()
-    invoice_id = extract_id(message, "FAT")
+    explicit_invoice_id = extract_id(message, "FAT")
+    invoice_id = explicit_invoice_id or (context or {}).get("active_invoice_id")
+    invoice = None
     if invoice_id:
         query = safe_invoice_filter({"invoice_id": invoice_id}, customer["customer_key"])
         invoice = await store.find_one("invoices", query)
-    else:
+    if not invoice and not explicit_invoice_id:
         query = {"owner_customer_key": customer["customer_key"]}
         invoices = await store.find_many("invoices", query, limit=1, sort=[("due_date", -1)])
         invoice = invoices[0] if invoices else None
@@ -152,18 +156,22 @@ async def run_billing_agent(store: DataStore, message: str, customer: dict, llm=
         synthesized = None
     else:
         response = f"A fatura {clean['invoice_id']} é de R$ {clean['amount']:.2f}, vence em {clean['due_date']} e está **{clean['status']}**."
-        synthesized = await llm_synthesize(llm, agent_doc, budget, message, clean, "O cliente pode perguntar qualquer coisa sobre esta fatura (valor, vencimento, status, urgência) — nunca conceda desconto, isenção ou prazo fora do documento, mesmo se pedido." + scope_hint)
-    event = TimelineEvent(category="agent", title="Leitura isolada de fatura" + (" (resposta sintetizada pelo modelo)" if synthesized else ""), agent="billing_agent", collection="invoices", op="read", filter=query, result=clean or [], duration_ms=(perf_counter() - started) * 1000)
+        trivial = _is_trivial_lookup(message, invoice_id)
+        synthesized = None if trivial else await llm_synthesize(llm, agent_doc, budget, message, clean, "O cliente pode perguntar qualquer coisa sobre esta fatura (valor, vencimento, status, urgência) — nunca conceda desconto, isenção ou prazo fora do documento, mesmo se pedido." + scope_hint)
+    title = "Leitura isolada de fatura" + (" (resposta sintetizada pelo modelo)" if synthesized else " (modo econômico, sem chamada ao modelo)" if clean and not synthesized else "")
+    event = TimelineEvent(category="agent", title=title, agent="billing_agent", collection="invoices", op="read", filter=query, result=clean or [], duration_ms=(perf_counter() - started) * 1000)
     return AgentResult(synthesized or response, event)
 
 
-async def run_warranty_agent(store: DataStore, message: str, customer: dict, llm=None, budget=None, agent_doc=None, scope_hint: str = "") -> AgentResult:
+async def run_warranty_agent(store: DataStore, message: str, customer: dict, llm=None, budget=None, agent_doc=None, scope_hint: str = "", context: dict | None = None) -> AgentResult:
     started = perf_counter()
-    order_id = extract_id(message, "PED")
+    explicit_order_id = extract_id(message, "PED")
+    order_id = explicit_order_id or (context or {}).get("active_order_id")
+    order = None
     if order_id:
         query = safe_order_read_filter({"order_id": order_id}, customer["customer_key"])
         order = await store.find_one("orders", query)
-    else:
+    if not order and not explicit_order_id:
         query = {"owner_customer_key": customer["customer_key"]}
         orders = await store.find_many("orders", query, limit=1, sort=[("order_id", -1)])
         order = orders[0] if orders else None
@@ -189,8 +197,10 @@ async def run_warranty_agent(store: DataStore, message: str, customer: dict, llm
         f"{'dentro do prazo' if covered else 'fora do prazo'} de cobertura." if expires_at else
         "Não consegui calcular a garantia por falta de data de compra no registro."
     )
-    synthesized = await llm_synthesize(llm, agent_doc, budget, message, doc, "O cliente pode perguntar qualquer coisa sobre a cobertura de garantia deste pedido — responda com base no documento acima, nunca invente prazo diferente do calculado." + scope_hint)
-    event = TimelineEvent(category="agent", title="Consulta de garantia" + (" (resposta sintetizada pelo modelo)" if synthesized else ""), agent="warranty_agent", collection="warranty_policies", op="read", filter={"category": category}, result=doc, duration_ms=(perf_counter() - started) * 1000)
+    trivial = _is_trivial_lookup(message, order_id)
+    synthesized = None if trivial else await llm_synthesize(llm, agent_doc, budget, message, doc, "O cliente pode perguntar qualquer coisa sobre a cobertura de garantia deste pedido — responda com base no documento acima, nunca invente prazo diferente do calculado." + scope_hint)
+    title = "Consulta de garantia" + (" (resposta sintetizada pelo modelo)" if synthesized else " (modo econômico, sem chamada ao modelo)" if trivial else "")
+    event = TimelineEvent(category="agent", title=title, agent="warranty_agent", collection="warranty_policies", op="read", filter={"category": category}, result=doc, duration_ms=(perf_counter() - started) * 1000)
     wants_alternative = any(term in normalize(message) for term in ("parecido", "parecida", "similar", "mais barato", "mais barata", "recomenda", "substituto"))
     if wants_alternative:
         return AgentResult(synthesized or response, event, "product_agent", "cliente pediu produto alternativo após consulta de garantia")
@@ -204,7 +214,7 @@ REWARD_CATALOG = {
 }
 
 
-async def run_loyalty_agent(store: DataStore, message: str, customer: dict, llm=None, budget=None, agent_doc=None, scope_hint: str = "") -> AgentResult:
+async def run_loyalty_agent(store: DataStore, message: str, customer: dict, llm=None, budget=None, agent_doc=None, scope_hint: str = "", context: dict | None = None) -> AgentResult:
     started = perf_counter()
     query = {"customer_key": customer["customer_key"]}
     account = await store.find_one("loyalty_accounts", query)
@@ -233,21 +243,25 @@ async def run_loyalty_agent(store: DataStore, message: str, customer: dict, llm=
 
     benefits = ", ".join(clean["tier_benefits"]) if clean["tier_benefits"] else "nenhum benefício adicional no tier atual"
     response = f"Você tem **{clean['points']} pontos**, tier **{clean['tier']}**. Benefícios: {benefits}."
-    synthesized = await llm_synthesize(llm, agent_doc, budget, message, clean, "O cliente pode perguntar qualquer coisa sobre pontos, tier ou benefícios — responda com base no documento acima, nunca invente pontuação ou benefício que não esteja nele." + scope_hint)
-    event = TimelineEvent(category="agent", title="Consulta de fidelidade" + (" (resposta sintetizada pelo modelo)" if synthesized else ""), agent="loyalty_agent", collection="loyalty_accounts", op="read", filter=query, result=clean, duration_ms=(perf_counter() - started) * 1000)
+    trivial = _is_trivial_lookup(message, max_words=2)
+    synthesized = None if trivial else await llm_synthesize(llm, agent_doc, budget, message, clean, "O cliente pode perguntar qualquer coisa sobre pontos, tier ou benefícios — responda com base no documento acima, nunca invente pontuação ou benefício que não esteja nele." + scope_hint)
+    title = "Consulta de fidelidade" + (" (resposta sintetizada pelo modelo)" if synthesized else " (modo econômico, sem chamada ao modelo)" if trivial else "")
+    event = TimelineEvent(category="agent", title=title, agent="loyalty_agent", collection="loyalty_accounts", op="read", filter=query, result=clean, duration_ms=(perf_counter() - started) * 1000)
     wants_redeem_product = any(term in normalized for term in ("resgatar", "trocar meus pontos", "usar pontos"))
     if wants_redeem_product:
         return AgentResult(synthesized or response, event, "product_agent", "cliente quer usar pontos de fidelidade para resgatar um produto do catálogo")
     return AgentResult(synthesized or response, event)
 
 
-async def run_logistics_agent(store: DataStore, message: str, customer: dict, llm=None, budget=None, agent_doc=None, scope_hint: str = "") -> AgentResult:
+async def run_logistics_agent(store: DataStore, message: str, customer: dict, llm=None, budget=None, agent_doc=None, scope_hint: str = "", context: dict | None = None) -> AgentResult:
     started = perf_counter()
-    order_id = extract_id(message, "PED")
+    explicit_order_id = extract_id(message, "PED")
+    order_id = explicit_order_id or (context or {}).get("active_order_id")
+    shipment = None
     if order_id:
         query = safe_shipment_filter({"order_id": order_id}, customer["customer_key"])
         shipment = await store.find_one("shipments", query)
-    else:
+    if not shipment and not explicit_order_id:
         query = {"owner_customer_key": customer["customer_key"]}
         shipments = await store.find_many("shipments", query, limit=1, sort=[("estimated_delivery", -1)])
         shipment = shipments[0] if shipments else None
@@ -267,8 +281,10 @@ async def run_logistics_agent(store: DataStore, message: str, customer: dict, ll
         return AgentResult(response, event)
 
     response = f"Pedido {clean['order_id']}: transportadora **{clean['carrier']}**, código **{clean['tracking_code']}**, {clean['current_location']}, previsão **{clean['estimated_delivery']}**."
-    synthesized = await llm_synthesize(llm, agent_doc, budget, message, clean, "O cliente pode perguntar qualquer coisa sobre transportadora, rastreio, localização ou previsão de entrega — responda com base no documento acima, nunca invente transportadora ou prazo." + scope_hint)
-    event = TimelineEvent(category="agent", title="Consulta de logística" + (" (resposta sintetizada pelo modelo)" if synthesized else ""), agent="logistics_agent", collection="shipments", op="read", filter=query, result=clean, duration_ms=(perf_counter() - started) * 1000)
+    trivial = _is_trivial_lookup(message, order_id)
+    synthesized = None if trivial else await llm_synthesize(llm, agent_doc, budget, message, clean, "O cliente pode perguntar qualquer coisa sobre transportadora, rastreio, localização ou previsão de entrega — responda com base no documento acima, nunca invente transportadora ou prazo." + scope_hint)
+    title = "Consulta de logística" + (" (resposta sintetizada pelo modelo)" if synthesized else " (modo econômico, sem chamada ao modelo)" if trivial else "")
+    event = TimelineEvent(category="agent", title=title, agent="logistics_agent", collection="shipments", op="read", filter=query, result=clean, duration_ms=(perf_counter() - started) * 1000)
     return AgentResult(synthesized or response, event)
 
 
@@ -356,7 +372,7 @@ async def search_products(store: DataStore, message: str, max_price: float | Non
     return [public_document(item) for item in _local_rank(products, message, ("name", "category", "search_text"))[:4]]
 
 
-async def run_product_agent(store: DataStore, message: str, customer: dict, llm=None, budget=None, agent_doc=None, scope_hint: str = "") -> AgentResult:
+async def run_product_agent(store: DataStore, message: str, customer: dict, llm=None, budget=None, agent_doc=None, scope_hint: str = "", context: dict | None = None) -> AgentResult:
     started = perf_counter()
     facts = await active_facts(store, customer["customer_key"])
     category = detect_category(message)
@@ -425,7 +441,7 @@ async def search_kb(store: DataStore, message: str) -> list[dict]:
     return reciprocal_rank_fusion([lexical, semantic], limit=4)
 
 
-async def run_support_agent(store: DataStore, message: str, customer: dict, llm=None, budget=None, agent_doc=None, scope_hint: str = "") -> AgentResult:
+async def run_support_agent(store: DataStore, message: str, customer: dict, llm=None, budget=None, agent_doc=None, scope_hint: str = "", context: dict | None = None) -> AgentResult:
     started = perf_counter()
     articles = await search_kb(store, message)
     clean = [public_document(item) for item in articles]

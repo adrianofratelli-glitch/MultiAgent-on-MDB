@@ -53,6 +53,13 @@ function ChatPanel({ messages, input, setInput, send, busy, customerName, demos 
         {messages.map((message, index) => (
           <div className={`message ${message.role}`} key={index}>
             <small>{message.role === 'user' ? 'você' : message.agent || 'assistente'}</small>
+            {message.role === 'assistant' && (
+              <span className={`cache-badge ${message.cacheHit ? 'hit' : 'miss'}`}>
+                {message.cacheHit
+                  ? `⚡ HIT (${message.cacheSource === 'curto_prazo' ? 'sessão atual' : 'cache global'}) — 0 tokens`
+                  : `🔄 MISS — ${message.tokens ?? 0} tokens, contexto de longo prazo usado: ${message.longTermUsed ? 'sim' : 'não'}`}
+              </span>
+            )}
             <div>{message.text}</div>
           </div>
         ))}
@@ -61,7 +68,16 @@ function ChatPanel({ messages, input, setInput, send, busy, customerName, demos 
         <textarea value={input} onChange={(event) => setInput(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); send(); } }} placeholder="Digite sua solicitação… (Enter envia, Shift+Enter quebra linha)" rows="3" />
         <button className="send-button" disabled={busy || !input.trim()}>{busy ? 'Coordenando…' : 'Enviar turno'}<span>↗</span></button>
       </form>
-      <div className="demo-prompts">{demos.map((demo) => <button key={demo.text} title={demo.label} onClick={() => setInput(demo.text)}>{demo.text}</button>)}</div>
+      <label className="demo-picker">
+        <span>roteiro rápido</span>
+        <select value="" onChange={(event) => {
+          const demo = demos[Number(event.target.value)];
+          if (demo) setInput(demo.text);
+        }}>
+          <option value="">Carregar um cenário de demonstração…</option>
+          {demos.map((demo, index) => <option key={demo.text} value={index}>{demo.label}</option>)}
+        </select>
+      </label>
     </section>
   );
 }
@@ -96,6 +112,65 @@ function AgentsPage({ agents, adminMode, setAdminMode, reload }) {
 
 function DataPage({ title, subtitle, children }) {
   return <section className="full-page-section"><div className="section-copy"><span className="eyebrow">plano de coordenação</span><h2>{title}</h2><p>{subtitle}</p></div><div className="data-surface">{children}</div></section>;
+}
+
+function MetricsPage({ metrics, evalRuns, adminMode }) {
+  const counters = metrics?.counters || {};
+  const route = metrics?.routes?.chat || {};
+  const cacheHits = Object.entries(counters).filter(([key]) => key.startsWith('cache.hits.')).reduce((sum, [, value]) => sum + value, 0);
+  const cacheMisses = counters['cache.misses'] || 0;
+  const cacheTotal = cacheHits + cacheMisses;
+  const collectionRows = Object.entries(counters).reduce((rows, [key, value]) => {
+    if (!key.startsWith('collection.')) return rows;
+    const parts = key.slice('collection.'.length).split('.');
+    const op = parts.pop();
+    const collection = parts.join('.');
+    const row = rows.get(collection) || { collection, read: 0, write: 0, vectorSearch: 0, hybridSearch: 0, changeStream: 0 };
+    row[op] = value;
+    rows.set(collection, row);
+    return rows;
+  }, new Map());
+  const cards = [
+    ['turnos concluídos', counters['route.chat.ok'] || 0, 'API /api/chat'],
+    ['latência p95', route.p95_ms ? `${Math.round(route.p95_ms)} ms` : '—', `${route.count || 0} amostras`],
+    ['tokens estimados', counters['tokens.total'] || 0, 'budget acumulado'],
+    ['cache hit rate', cacheTotal ? `${Math.round((cacheHits / cacheTotal) * 100)}%` : '—', `${cacheHits} hits · ${cacheMisses} misses`],
+    ['guardrails', counters['guardrails.blocked'] || 0, 'turnos bloqueados'],
+  ];
+
+  return (
+    <section className="full-page-section">
+      <div className="section-copy">
+        <span className="eyebrow">observabilidade operacional</span>
+        <h2>O valor aparece no fluxo, não no log.</h2>
+        <p>Latência, custo, cache e operações MongoDB em uma leitura executiva — com o JSON bruto disponível para inspeção técnica.</p>
+      </div>
+      <div className="metric-grid">
+        {cards.map(([label, value, note]) => <article className="metric-card" key={label}><span>{label}</span><strong>{value}</strong><small>{note}</small></article>)}
+      </div>
+      <div className="metric-ledger">
+        <div className="panel-label"><span>coleções em operação</span><code>collection.*</code></div>
+        {collectionRows.size === 0
+          ? <p className="metric-empty">Execute um cenário no Chat para materializar leituras, escritas e buscas.</p>
+          : <div className="metric-table-wrap"><table><thead><tr><th>collection</th><th>read</th><th>write</th><th>vector</th><th>hybrid</th></tr></thead><tbody>
+            {[...collectionRows.values()].sort((a, b) => a.collection.localeCompare(b.collection)).map((row) => <tr key={row.collection}><td><code>{row.collection}</code></td><td>{row.read}</td><td className={row.write ? 'hot' : ''}>{row.write}</td><td>{row.vectorSearch}</td><td>{row.hybridSearch}</td></tr>)}
+          </tbody></table></div>}
+      </div>
+      <div className="eval-panel">
+        <div className="panel-label"><span>qualidade · GoalSuccessRate</span><code>eval_runs</code></div>
+        {!adminMode && <p className="metric-empty">Ative o modo admin em Agentes para consultar o histórico de avaliação.</p>}
+        {adminMode && !evalRuns.length && <p className="metric-empty">Nenhuma execução registrada. Rode <code>python eval.py</code> no backend.</p>}
+        {adminMode && evalRuns.map((run) => (
+          <div className="eval-run" key={run.at}>
+            <b className={run.pass_rate === 1 ? 'ok' : ''}>{Math.round(run.pass_rate * 100)}%</b>
+            <span>{run.passed}/{run.total} casos</span>
+            <code>{new Date(run.at).toLocaleString('pt-BR')}</code>
+          </div>
+        ))}
+      </div>
+      <details className="raw-metrics"><summary>Ver payload técnico</summary><pre>{JSON.stringify(metrics, null, 2)}</pre></details>
+    </section>
+  );
 }
 
 export default function App() {
@@ -184,7 +259,8 @@ export default function App() {
     try {
       const run = await api.chat(value, conversationId);
       setConversationId(run.conversation_id); setTimeline(run.timeline); setLastRun(run);
-      setMessages((items) => [...items, { role: 'assistant', agent: run.active_agent, text: run.response }]);
+      const longTermUsed = (run.timeline || []).some((event) => event.collection === 'long_term_memory');
+      setMessages((items) => [...items, { role: 'assistant', agent: run.active_agent, text: run.response, cacheHit: run.cache_hit, cacheSource: run.cache_source, tokens: run.usage?.total ?? 0, longTermUsed }]);
       const [hs, met, gr, mem] = await Promise.all([api.handoffs(run.conversation_id), api.metrics(), api.guardrails('events'), api.memory(customer.customer_key)]);
       setHandoffs(hs); setMetrics(met); setGuardrails(gr); setMemory(mem);
     } catch (err) { setError(err.message); }
@@ -272,26 +348,9 @@ export default function App() {
         </>}
         {nav === 'Agentes' && <AgentsPage agents={agents} adminMode={adminMode} setAdminMode={setAdminMode} reload={loadCore} />}
         {nav === 'Guardrails' && <DataPage title="Segurança antes da inteligência." subtitle="Entrada é validada uma vez por turno, antes de qualquer modelo, memória ou trace.">{guardrails.length ? <pre>{JSON.stringify(guardrails, null, 2)}</pre> : <p className="inspector-empty">Nenhum evento ainda — só aparece aqui quando uma mensagem é de fato bloqueada. Tente o prompt de guardrail sugerido para a identidade Carla ou Diego.</p>}</DataPage>}
-        {nav === 'Métricas' && (
-          <DataPage title="Cada agente presta contas." subtitle="Latência, tokens, cache, handoffs e bloqueios aparecem por agente e por rota.">
-            <pre>{JSON.stringify(metrics, null, 2)}</pre>
-            <div className="eval-panel">
-              <div className="panel-label"><span>eval harness · GoalSuccessRate</span><code>eval_runs</code></div>
-              {!adminMode && <p className="inspector-empty">Ligue o modo admin na aba Agentes pra ver o histórico de qualidade (backend/eval.py).</p>}
-              {adminMode && !evalRuns.length && <p className="inspector-empty">Nenhuma execução ainda. Rode <code>python eval.py</code> no backend.</p>}
-              {adminMode && evalRuns.map((run) => (
-                <div className="eval-run" key={run.at}>
-                  <b className={run.pass_rate === 1 ? 'ok' : ''}>{Math.round(run.pass_rate * 100)}%</b>
-                  <span>{run.passed}/{run.total} casos</span>
-                  <code>{new Date(run.at).toLocaleString('pt-BR')}</code>
-                </div>
-              ))}
-            </div>
-          </DataPage>
-        )}
+        {nav === 'Métricas' && <MetricsPage metrics={metrics} evalRuns={evalRuns} adminMode={adminMode} />}
       </main>
       <footer><span>MongoDB Atlas</span><code>multi_agent_poc + ai_brain</code><span>{customer?.name || 'identidade demo'}</span></footer>
     </>
   );
 }
-

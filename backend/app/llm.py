@@ -1,5 +1,4 @@
 import asyncio
-from typing import Any
 
 import anthropic
 
@@ -51,4 +50,3 @@ class LLMGateway:
         if last_error:
             return None, {"input_tokens": 0, "output_tokens": 0}
         return None, {"input_tokens": 0, "output_tokens": 0}
-

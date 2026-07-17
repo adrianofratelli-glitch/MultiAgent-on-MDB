@@ -13,7 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from .budget import BudgetExceeded
-from .config import Settings, get_settings
+from .config import get_settings
 from .database import DataStore, get_store, set_store, utcnow
 from .llm import LLMGateway
 from .metrics import metrics

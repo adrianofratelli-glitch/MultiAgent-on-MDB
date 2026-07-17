@@ -1,5 +1,5 @@
 const CATEGORY_LABELS = {
-  agent: 'agente', memory: 'memória', guardrail: 'guardrail', cache: 'cache', handoff: 'coordenação',
+  agent: 'agente', memory: 'memória', guardrail: 'guardrail', cache: 'cache', handoff: 'coordenação', fanout: 'paralelo',
 };
 
 function JsonBlock({ value }) {
@@ -41,4 +41,3 @@ export default function Timeline({ events }) {
     </div>
   );
 }
-

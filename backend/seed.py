@@ -125,17 +125,43 @@ async def create_search_indexes(store: DataStore) -> list[str]:
             SearchIndexModel(
                 name="cache_autoembed_v1",
                 type="vectorSearch",
-                definition={"fields": [{"type": "autoEmbed", "modality": "text", "path": "question_norm", "model": "voyage-4", "numDimensions": 1024, "similarity": "cosine", "indexingMethod": "flat"}, {"type": "filter", "path": "agent"}, {"type": "filter", "path": "area"}, {"type": "filter", "path": "customer_key"}]},
+                definition={"fields": [{"type": "autoEmbed", "modality": "text", "path": "question_text", "model": "voyage-4", "numDimensions": 1024, "similarity": "cosine", "indexingMethod": "flat"}, {"type": "filter", "path": "agent"}, {"type": "filter", "path": "area"}, {"type": "filter", "path": "customer_key"}, {"type": "filter", "path": "scope"}]},
+            ),
+        ),
+        (
+            "short_term_memory",
+            SearchIndexModel(
+                name="short_term_autoembed_v1",
+                type="vectorSearch",
+                definition={"fields": [{"type": "autoEmbed", "modality": "text", "path": "question_text", "model": "voyage-4", "numDimensions": 1024, "similarity": "cosine", "indexingMethod": "flat"}, {"type": "filter", "path": "session_id"}, {"type": "filter", "path": "customer_key"}, {"type": "filter", "path": "agent"}]},
+            ),
+        ),
+        (
+            "long_term_memory",
+            SearchIndexModel(
+                name="long_term_autoembed_v1",
+                type="vectorSearch",
+                definition={"fields": [{"type": "autoEmbed", "modality": "text", "path": "text", "model": "voyage-4", "numDimensions": 1024, "similarity": "cosine", "indexingMethod": "flat"}, {"type": "filter", "path": "customer_key"}]},
             ),
         ),
     ]
     messages: list[str] = []
     for collection, model in definitions:
         try:
+            db = store.client[store.settings.mongodb_db]
+            try:
+                await db.create_collection(collection)
+            except Exception:
+                pass  # já existe
             cursor = await store._collection(collection).list_search_indexes()
             existing = {item["name"] for item in await cursor.to_list(None)}
             if model.document["name"] not in existing:
                 await store._collection(collection).create_search_index(model)
+            else:
+                await store._collection(collection).update_search_index(
+                    model.document["name"],
+                    model.document["definition"],
+                )
             messages.append(f"{collection}.{model.document['name']}: solicitado")
         except Exception as exc:
             messages.append(f"{collection}.{model.document['name']}: best-effort ({exc})")
