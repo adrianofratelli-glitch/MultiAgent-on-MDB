@@ -125,6 +125,20 @@ async def agents(_: Annotated[dict, Depends(current_customer)], store: DataStore
     return [{key: value for key, value in item.items() if key != "_id"} for item in items]
 
 
+@app.get("/api/demo-scenarios")
+async def demo_scenarios(customer: Annotated[dict, Depends(current_customer)], store: DataStore = Depends(get_store)):
+    """Roteiro versionado no plano de coordenação; UI, warmup e eval usam a mesma fonte."""
+    items = await store.find_many(
+        "demo_scenarios",
+        {"customer_key": customer["customer_key"]},
+        brain=True,
+        limit=20,
+        sort=[("position", 1)],
+    )
+    public_keys = ("scenario_id", "position", "label", "message", "capabilities")
+    return [{key: item[key] for key in public_keys if key in item} for item in items]
+
+
 @app.get("/api/conversations/latest")
 async def latest_conversation(customer: dict = Depends(current_customer), store: DataStore = Depends(get_store)):
     conversations = await store.find_many("agent_conversations", {"customer_key": customer["customer_key"]}, limit=1, sort=[("updated_at", -1)])

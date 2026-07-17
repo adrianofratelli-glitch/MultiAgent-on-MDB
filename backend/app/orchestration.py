@@ -24,7 +24,11 @@ async def _record_collection_metrics(timeline: list[TimelineEvent]) -> None:
             await metrics.increment(f"collection.{event.collection}.{event.op}")
 
 
-MAX_HOPS = 4  # cadeia mais longa que o "handoff único" original: mostra o multi-agent orquestrando de verdade
+MAX_HOPS = 5
+# Retornos só existem quando representam uma dependência de negócio explícita. O limite por agente
+# mantém o grafo finito mesmo se uma configuração dinâmica introduzir um ciclo acidental.
+ALLOWED_REVISITS = {("logistics_agent", "order_agent")}
+MAX_VISITS_PER_AGENT = 2
 FALLBACK_AGENTS = {
     "product_agent": "support_agent",
     "support_agent": "order_agent",
@@ -159,13 +163,20 @@ class OrchestrationService:
         handoff_chain: list[dict] = []
         responses: list[str] = []
         current = target
-        visited = {current}
+        visit_counts = {current: 1}
+        handoff_path = [current]
         for hop in range(MAX_HOPS):
             runner = RUNNERS.get(current)
             if not runner:
                 break
             await metrics.increment(f"agent.{current}.turns")
-            turn_context = {"active_order_id": (conversation or {}).get("active_order_id"), "active_invoice_id": (conversation or {}).get("active_invoice_id")}
+            turn_context = {
+                "active_order_id": (conversation or {}).get("active_order_id"),
+                "active_invoice_id": (conversation or {}).get("active_invoice_id"),
+                "handoff_path": list(handoff_path),
+                "visit_counts": dict(visit_counts),
+                "returning_from": handoff_path[-2] if len(handoff_path) > 1 else None,
+            }
             result = await runner(self.store, masked, customer, self.llm, budget, registry.get(current), (history_hint + long_term_hint) if hop == 0 else "", turn_context)
             timeline.append(result.event)
             timeline.extend(result.extra_events)
@@ -176,17 +187,25 @@ class OrchestrationService:
             destination = result.handoff_to
             if destination not in registry:
                 destination = FALLBACK_AGENTS.get(destination, target)
-            if destination == current or destination in visited:
+            is_revisit = visit_counts.get(destination, 0) > 0
+            revisit_allowed = (
+                (current, destination) in ALLOWED_REVISITS
+                and visit_counts.get(destination, 0) < MAX_VISITS_PER_AGENT
+            )
+            if destination == current or (is_revisit and not revisit_allowed):
                 responses.append(
                     "O agente de destino está desativado ou já atuou neste turno; mantive a orientação disponível sem criar um handoff circular."
                 )
                 break
-            visited.add(destination)
             handoff = {"conversation_id": conversation_id, "from_agent": current, "to_agent": destination, "reason": result.handoff_reason, "at": utcnow()}
             await self.store.insert_one("agent_handoffs", handoff)
             handoff_chain.append(handoff)
-            timeline.append(TimelineEvent(category="handoff", title="Handoff explícito", agent=current, collection="agent_handoffs", op="write", filter={"conversation_id": conversation_id}, result={"to_agent": destination}, reason=result.handoff_reason))
+            timeline.append(TimelineEvent(category="handoff", title="Retorno controlado" if is_revisit else "Handoff explícito", agent=current, collection="agent_handoffs", op="write", filter={"conversation_id": conversation_id}, result={"to_agent": destination, "revisit": is_revisit}, reason=result.handoff_reason))
             await metrics.increment(f"agent.{current}.handoffs")
+            if is_revisit:
+                await metrics.increment("coordination.revisits")
+            visit_counts[destination] = visit_counts.get(destination, 0) + 1
+            handoff_path.append(destination)
             current = destination
 
         response = "\n\n".join(responses) or "Não foi possível concluir o atendimento com segurança."

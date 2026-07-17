@@ -45,6 +45,31 @@ def run_case(client: httpx.Client, case: dict) -> dict:
         checks.append(("route_source", body["route_source"] == case["expect_route_source"]))
     if case.get("expect_contains"):
         checks.append(("contains", case["expect_contains"] in body["response"]))
+    raw_agent_sequence = [
+        event["agent"]
+        for event in body.get("timeline", [])
+        if event.get("category") == "agent" and event.get("agent")
+    ]
+    agent_sequence = [
+        agent
+        for index, agent in enumerate(raw_agent_sequence)
+        if index == 0 or agent != raw_agent_sequence[index - 1]
+    ]
+    if "expected_agents" in case:
+        checks.append(("agent_sequence", agent_sequence == case["expected_agents"]))
+    if "expect_handoffs" in case:
+        handoffs = sum(1 for event in body.get("timeline", []) if event.get("category") == "handoff")
+        checks.append(("handoffs", handoffs == case["expect_handoffs"]))
+    if case.get("expect_write_collection"):
+        writes = {
+            event.get("collection")
+            for event in body.get("timeline", [])
+            if event.get("op") == "write"
+        }
+        checks.append(("business_write", case["expect_write_collection"] in writes))
+    if "expect_revisit" in case:
+        has_revisit = len(agent_sequence) != len(set(agent_sequence))
+        checks.append(("revisit", has_revisit == case["expect_revisit"]))
 
     passed = all(ok for _, ok in checks)
     return {
@@ -54,6 +79,7 @@ def run_case(client: httpx.Client, case: dict) -> dict:
         "checks": {name: ok for name, ok in checks},
         "active_agent": body["active_agent"],
         "route_source": body["route_source"],
+        "agent_sequence": agent_sequence,
         "response_preview": body["response"][:200],
     }
 

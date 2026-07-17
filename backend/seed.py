@@ -12,6 +12,7 @@ from app.config import get_settings  # noqa: E402
 from app.database import DataStore  # noqa: E402
 from app.seed_data import (  # noqa: E402
     AGENTS,
+    DEMO_SCENARIOS,
     GUARDRAIL_POLICIES,
     ROUTING_RULES,
     seed_documents,
@@ -49,6 +50,10 @@ async def seed(store: DataStore, *, create_indexes: bool = True) -> list[str]:
         await store.replace_one(
             "routing_rules", {"intent": rule["intent"]}, rule, brain=True, upsert=True
         )
+    for scenario in DEMO_SCENARIOS:
+        await store.replace_one(
+            "demo_scenarios", {"scenario_id": scenario["scenario_id"]}, scenario, brain=True, upsert=True
+        )
     for policy in GUARDRAIL_POLICIES:
         await store.replace_one(
             "guardrail_policies", {"area": policy["area"]}, policy, brain=True, upsert=True
@@ -60,7 +65,7 @@ async def seed(store: DataStore, *, create_indexes: bool = True) -> list[str]:
         brain=True,
         upsert=True,
     )
-    messages.append("ai_brain: registry, routing, policies e model_config")
+    messages.append(f"ai_brain: registry, routing, policies, model_config e {len(DEMO_SCENARIOS)} cenários")
 
     if create_indexes:
         try:

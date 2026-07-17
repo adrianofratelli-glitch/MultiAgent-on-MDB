@@ -123,6 +123,13 @@ async def run_order_agent(store: DataStore, message: str, customer: dict, llm=No
             op = "read"
             filter_used = query
         event = TimelineEvent(category="agent", title=title, agent="order_agent", collection="orders", op=op, filter=filter_used, result=public_document(clean), duration_ms=(perf_counter() - started) * 1000)
+        if (context or {}).get("returning_from") == "logistics_agent":
+            response = (
+                f"Confirmação final: o pedido {clean['order_id']} de {clean['product']} permanece "
+                f"com status **{clean['status']}** após a consulta logística."
+            )
+            event.title = "Confirmação final do pedido após logística"
+            return AgentResult(response, event)
         wants_billing_check = any(term in normalize(message) for term in ("fatura", "cobranca", "cobrança", "desconto"))
         wants_logistics_check = any(term in normalize(message) for term in ("rastreio", "transportadora", "entrega", "rastreamento"))
         if wants_billing_check:
@@ -271,13 +278,28 @@ async def run_logistics_agent(store: DataStore, message: str, customer: dict, ll
         event = TimelineEvent(category="agent", title="Consulta de logística", agent="logistics_agent", collection="shipments", op="read", filter=query, result=[], duration_ms=(perf_counter() - started) * 1000)
         return AgentResult(response, event)
 
-    wants_reschedule = any(term in normalize(message) for term in ("reagendar", "mudar a entrega", "outro dia", "adiar a entrega"))
+    normalized = normalize(message)
+    wants_final_order_confirmation = any(
+        term in normalized
+        for term in (
+            "volte para confirmar",
+            "confirme que a troca",
+            "confirmar que a troca",
+            "confirme que o reembolso",
+            "confirmar que o reembolso",
+            "status final",
+        )
+    )
+    order_already_ran = "order_agent" in (context or {}).get("handoff_path", [])
+    wants_reschedule = any(term in normalized for term in ("reagendar", "mudar a entrega", "outro dia", "adiar a entrega"))
     if wants_reschedule and clean["current_location"] != "Entregue":
         # escrita restrita: só um campo de sinalização, nunca a transportadora/prazo real — quem confirma
         # a nova data é a transportadora, o sistema só registra o pedido de reagendamento.
         await store.update_one("shipments", query, {"$set": {"reschedule_requested": True}})
         response = f"Reagendamento solicitado para o pedido {clean['order_id']}. A transportadora **{clean['carrier']}** vai confirmar uma nova janela de entrega em até 24h."
         event = TimelineEvent(category="agent", title="Reagendamento de entrega solicitado", agent="logistics_agent", collection="shipments", op="write", filter=query, result={**clean, "reschedule_requested": True}, duration_ms=(perf_counter() - started) * 1000)
+        if wants_final_order_confirmation and order_already_ran:
+            return AgentResult(response, event, "order_agent", "cliente pediu confirmação final do pedido após a etapa logística")
         return AgentResult(response, event)
 
     response = f"Pedido {clean['order_id']}: transportadora **{clean['carrier']}**, código **{clean['tracking_code']}**, {clean['current_location']}, previsão **{clean['estimated_delivery']}**."
@@ -285,6 +307,8 @@ async def run_logistics_agent(store: DataStore, message: str, customer: dict, ll
     synthesized = None if trivial else await llm_synthesize(llm, agent_doc, budget, message, clean, "O cliente pode perguntar qualquer coisa sobre transportadora, rastreio, localização ou previsão de entrega — responda com base no documento acima, nunca invente transportadora ou prazo." + scope_hint)
     title = "Consulta de logística" + (" (resposta sintetizada pelo modelo)" if synthesized else " (modo econômico, sem chamada ao modelo)" if trivial else "")
     event = TimelineEvent(category="agent", title=title, agent="logistics_agent", collection="shipments", op="read", filter=query, result=clean, duration_ms=(perf_counter() - started) * 1000)
+    if wants_final_order_confirmation and order_already_ran:
+        return AgentResult(synthesized or response, event, "order_agent", "cliente pediu confirmação final do pedido após a etapa logística")
     return AgentResult(synthesized or response, event)
 
 

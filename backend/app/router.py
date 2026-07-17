@@ -22,10 +22,16 @@ def cheap_route(message: str, rules: Iterable[dict]) -> RouteDecision | None:
     text = normalize(message)
     scored: list[tuple[int, int, dict]] = []
     for rule in rules:
+        seen_norms: set[str] = set()
         matches = 0
         for keyword in rule.get("keywords", []):
-            pattern = rf"(?<!\w){re.escape(normalize(str(keyword)))}(?!\w)"
-            matches += bool(re.search(pattern, text))
+            keyword_norm = normalize(str(keyword))
+            if keyword_norm in seen_norms:
+                continue
+            pattern = rf"(?<!\w){re.escape(keyword_norm)}(?!\w)"
+            if re.search(pattern, text):
+                matches += 1
+                seen_norms.add(keyword_norm)
         if matches:
             scored.append((matches, int(rule.get("priority", 0)), rule))
     if not scored:

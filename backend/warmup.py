@@ -9,35 +9,26 @@ Uso: python warmup.py [URL]
 """
 
 import sys
+from pathlib import Path
 
 import httpx
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from app.seed_data import DEMO_SCENARIOS  # noqa: E402
 
 
 BASE = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8031"
 
-# Espelha os atalhos não-guardrail de frontend/src/App.jsx:DEMOS_BY_IDENTITY — mesma frase exata, senão
-# o cache não bate (chave é agent+area+customer_key+question_norm da mensagem).
+# Só pré-aquece cenários read-only explicitamente marcados. Writes, guardrails e cadeias com retorno
+# continuam frios para que a demo mostre a execução real e não esconda ações atrás de cache.
 WARM_PROMPTS = {
-    "ana": [
-        "meu pedido PED-1001 chegou com defeito, quero um parecido mais barato, e quero trocar — isso mexe na minha fatura?",
-        "onde está meu pedido PED-1001 e quanto ainda devo na minha fatura?",
-        "o pedido PED-1002 ainda está no prazo de garantia? se não estiver, quero um teclado parecido mais barato",
-        "quero resgatar meus pontos de fidelidade por um produto",
-    ],
-    "bruno": [
-        "meu monitor do pedido PED-2001 chegou com defeito, quero um parecido mais barato, e quero trocar — isso mexe na minha fatura?",
-        "quero trocar o pedido PED-2001 e saber sobre a entrega dele",
-        "meu pedido PED-2001 está na garantia? mesmo assim quero um monitor parecido mais barato",
-        "quero resgatar meus pontos de fidelidade por um produto",
-    ],
-    "carla": [
-        "meu smartwatch do pedido PED-3001 chegou com defeito, quero um parecido mais barato, e quero trocar — isso mexe na minha fatura?",
-        "onde está meu pedido PED-3001 e minha fatura já foi paga?",
-    ],
-    "diego": [
-        "minha caixa de som do pedido PED-4001 chegou com defeito, quero uma parecida mais barata, e quero trocar — isso mexe na minha fatura?",
-        "quero trocar o pedido PED-4001 e saber sobre a entrega dele",
-    ],
+    customer_key: [
+        scenario["message"]
+        for scenario in DEMO_SCENARIOS
+        if scenario["customer_key"] == customer_key and scenario.get("warmup")
+    ]
+    for customer_key in {scenario["customer_key"] for scenario in DEMO_SCENARIOS}
 }
 
 

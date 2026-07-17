@@ -25,6 +25,7 @@ export const api = {
   },
   health: () => request('/api/health'),
   agents: () => request('/api/agents'),
+  demoScenarios: () => request('/api/demo-scenarios'),
   metrics: () => request('/api/metrics'),
   handoffs: (id) => request(`/api/handoffs?conversation_id=${encodeURIComponent(id)}`),
   memory: (key) => request(`/api/memory/${encodeURIComponent(key)}`),

@@ -184,9 +184,10 @@ class DataStore:
         """Live feed de handoffs do cliente: Change Stream no Atlas, poll no modo DEMO_MODE."""
         if not self.memory:
             try:
-                async with self._collection("agent_handoffs").watch(
+                stream = await self._collection("agent_handoffs").watch(
                     [{"$match": {"operationType": "insert"}}], full_document="updateLookup"
-                ) as stream:
+                )
+                async with stream:
                     async for change in stream:
                         doc = change["fullDocument"]
                         owner = await self.find_one("agent_conversations", {"conversation_id": doc.get("conversation_id"), "customer_key": customer_key})
@@ -312,4 +313,3 @@ def get_store() -> DataStore:
     if store is None:
         raise RuntimeError("DataStore ainda não inicializado")
     return store
-
