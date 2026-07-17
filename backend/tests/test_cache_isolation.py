@@ -96,3 +96,25 @@ async def test_foreign_conversation_id_is_replaced_instead_of_hijacked():
     original = await store.find_one("agent_conversations", {"conversation_id": "conv-da-ana"})
     assert original["customer_key"] == "ana"
     assert original["turns"][0]["content"] == "segredo da Ana"
+
+
+async def test_atlas_index_drift_falls_back_without_breaking_the_turn():
+    class IndexBuildingStore:
+        memory = False
+
+        async def aggregate(self, *_args, **_kwargs):
+            raise RuntimeError("filter path ainda não disponível no índice")
+
+        async def find_one(self, *_args, **_kwargs):
+            return None
+
+    result = await cascade_lookup(
+        IndexBuildingStore(),
+        target="order_agent",
+        area="varejo",
+        customer_key="ana",
+        session_id="conv-1",
+        message="onde está meu pedido",
+    )
+
+    assert result.hit is False

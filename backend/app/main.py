@@ -66,6 +66,7 @@ app.add_middleware(
 @app.middleware("http")
 async def request_context(request: Request, call_next):
     request_id = request.headers.get("X-Request-Id") or uuid.uuid4().hex
+    request.state.request_id = request_id
     started = perf_counter()
     try:
         response = await call_next(request)
@@ -80,6 +81,19 @@ async def request_context(request: Request, call_next):
 @app.exception_handler(BudgetExceeded)
 async def budget_handler(_: Request, exc: BudgetExceeded):
     return JSONResponse(status_code=429, content={"detail": f"Turno encerrado com resposta parcial: {exc}"})
+
+
+@app.exception_handler(Exception)
+async def unhandled_error_handler(request: Request, exc: Exception):
+    request_id = getattr(request.state, "request_id", "unknown")
+    log("unhandled_error", request_id=request_id, path=request.url.path, error=type(exc).__name__)
+    return JSONResponse(
+        status_code=500,
+        content={
+            "detail": "Falha interna ao processar o turno. Consulte o request_id nos logs.",
+            "request_id": request_id,
+        },
+    )
 
 
 @app.post("/api/auth/token")

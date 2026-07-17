@@ -54,7 +54,19 @@ async def cascade_lookup(store: DataStore, *, target: str, area: str, customer_k
         {"$sort": {"score": -1}},
         {"$limit": 1},
     ]
-    results = await store.aggregate("short_term_memory", pipeline)
+    try:
+        results = await store.aggregate("short_term_memory", pipeline)
+    except Exception:
+        # Search indexes são atualizados de forma assíncrona no Atlas. Durante rollout ou drift de definição,
+        # mantém o atendimento disponível com match exato e os mesmos filtros de isolamento.
+        return await _cascade_lookup_fallback(
+            store,
+            target=target,
+            area=area,
+            customer_key=customer_key,
+            session_id=session_id,
+            message=message,
+        )
     if not results:
         return CascadeResult(hit=False)
     best = results[0]
@@ -96,7 +108,16 @@ async def cascade_long_term_context(store: DataStore, *, customer_key: str, mess
         {"$vectorSearch": {"index": "long_term_autoembed_v1", "path": "text", "query": {"text": message}, "model": "voyage-4", "filter": {"customer_key": customer_key}, "numCandidates": 50, "limit": settings.long_term_memory_limit}},
         {"$addFields": {"score": {"$meta": "vectorSearchScore"}}},
     ]
-    return await store.aggregate("long_term_memory", pipeline)
+    try:
+        return await store.aggregate("long_term_memory", pipeline)
+    except Exception:
+        # Memória de longo prazo enriquece o prompt, mas não pode derrubar o turno se o índice estiver
+        # construindo ou indisponível. A consulta comum continua isolada por customer_key.
+        return await store.find_many(
+            "long_term_memory",
+            {"customer_key": customer_key},
+            limit=settings.long_term_memory_limit,
+        )
 
 
 async def cascade_store_turn(
