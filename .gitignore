@@ -22,3 +22,4 @@ docs/Guia-PoV-Multi-Agent.pdf
 *.env.bak
 outputs/
 pov-agent-memory-mongodb-template.pdf
+AGENTS.md CLAUDE.md 
