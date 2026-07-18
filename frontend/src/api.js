@@ -30,7 +30,7 @@ export const api = {
   handoffs: (id) => request(`/api/handoffs?conversation_id=${encodeURIComponent(id)}`),
   memory: (key) => request(`/api/memory/${encodeURIComponent(key)}`),
   latestConversation: () => request('/api/conversations/latest'),
-  guardrails: (view = 'events') => request(`/api/guardrails/${view}`),
+  guardrails: (view = 'events') => request(`/api/guardrails/${view}`, { headers: { 'X-Admin-Key': import.meta.env.VITE_ADMIN_KEY || '' } }),
   chat: (message, conversationId) => request('/api/chat', { method: 'POST', body: JSON.stringify({ message, conversation_id: conversationId || null }) }),
   updateAgent: (key, update) => request(`/api/admin/agents/${key}`, { method: 'PATCH', headers: { 'X-Admin-Key': import.meta.env.VITE_ADMIN_KEY || '' }, body: JSON.stringify(update) }),
   evalRuns: () => request('/api/eval/runs', { headers: { 'X-Admin-Key': import.meta.env.VITE_ADMIN_KEY || '' } }),

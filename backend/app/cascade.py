@@ -149,13 +149,13 @@ async def cascade_store_turn(
     await store.replace_one(
         "semantic_cache",
         {"agent": target, "customer_key": customer_key, "scope": "customer", "question_norm": question_norm},
-        {"agent": target, "area": area, "customer_key": customer_key, "scope": "customer", "question_text": message, "question_norm": question_norm, "answer": answer, "active_agent": active_agent, "timeline": timeline, "created_at": now, "expires_at": now + timedelta(minutes=60)},
+        {"agent": target, "area": area, "customer_key": customer_key, "scope": "customer", "question_text": message, "question_norm": question_norm, "answer": answer, "active_agent": active_agent, "timeline": timeline, "created_at": now, "expires_at": now + timedelta(hours=24)},
         upsert=True,
     )
     if global_eligible and intent in GLOBAL_CACHE_INTENTS:
         await store.replace_one(
             "semantic_cache",
             {"agent": target, "area": area, "scope": "global", "question_norm": question_norm},
-            {"agent": target, "area": area, "scope": "global", "question_text": message, "question_norm": question_norm, "answer": answer, "active_agent": active_agent, "timeline": timeline, "created_at": now, "expires_at": now + timedelta(minutes=60)},
+            {"agent": target, "area": area, "scope": "global", "question_text": message, "question_norm": question_norm, "answer": answer, "active_agent": active_agent, "timeline": timeline, "created_at": now, "expires_at": now + timedelta(hours=24)},
             upsert=True,
         )

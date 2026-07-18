@@ -31,8 +31,8 @@ async def llm_synthesize(llm, agent_doc: dict | None, budget, message: str, docu
     e segura (ownership, filtros), só a fala final é gerada, o que cobre qualquer forma de perguntar, não só o script."""
     if not llm or not getattr(llm, "client", None) or not agent_doc:
         return None
-    context = f"{GROUNDING_RULES} {extra}\n\nDocumentos:\n{json.dumps(documents, ensure_ascii=False, default=str)}"
-    text, _ = await llm.complete(agent=agent_doc, user_message=message, dynamic_context=context, budget=budget)
+    context = f"{extra}\n\nDocumentos:\n{json.dumps(documents, ensure_ascii=False, default=str)}"
+    text, _ = await llm.complete(agent=agent_doc, user_message=message, dynamic_context=context, budget=budget, static_context=GROUNDING_RULES)
     return text
 
 

@@ -109,7 +109,11 @@ class DataStore:
 
     async def count(self, name: str, query: dict | None = None, *, brain: bool = False) -> int:
         if not self.memory:
-            return await self._collection(name, brain).count_documents(query or {})
+            if not query:
+                # Contagem sem filtro (health/painéis): metadata da collection,
+                # O(1) — count_documents({}) faz scan completo.
+                return await self._collection(name, brain).estimated_document_count()
+            return await self._collection(name, brain).count_documents(query)
         return len(await self.find_many(name, query, brain=brain, limit=100_000))
 
     async def insert_one(self, name: str, document: dict, *, brain: bool = False) -> None:
@@ -184,15 +188,24 @@ class DataStore:
         """Live feed de handoffs do cliente: Change Stream no Atlas, poll no modo DEMO_MODE."""
         if not self.memory:
             try:
+                # customer_key denormalizado no handoff: o filtro de dono roda no
+                # próprio Change Stream (server-side), sem find_one por evento.
+                # Docs antigos sem o campo caem no fallback app-side abaixo.
                 stream = await self._collection("agent_handoffs").watch(
-                    [{"$match": {"operationType": "insert"}}], full_document="updateLookup"
+                    [{"$match": {"operationType": "insert", "$or": [
+                        {"fullDocument.customer_key": customer_key},
+                        {"fullDocument.customer_key": {"$exists": False}},
+                    ]}}],
+                    full_document="updateLookup",
                 )
                 async with stream:
                     async for change in stream:
                         doc = change["fullDocument"]
-                        owner = await self.find_one("agent_conversations", {"conversation_id": doc.get("conversation_id"), "customer_key": customer_key})
-                        if owner:
-                            yield {key: value for key, value in doc.items() if key != "_id"}
+                        if doc.get("customer_key") is None:  # legado: valida dono via conversa
+                            owner = await self.find_one("agent_conversations", {"conversation_id": doc.get("conversation_id"), "customer_key": customer_key})
+                            if not owner:
+                                continue
+                        yield {key: value for key, value in doc.items() if key != "_id"}
                 return
             except Exception:
                 pass
@@ -221,6 +234,7 @@ class DataStore:
                     "required": ["conversation_id", "from_agent", "to_agent", "reason", "at"],
                     "properties": {
                         "conversation_id": {"bsonType": "string", "minLength": 4},
+                        "customer_key": {"bsonType": "string"},
                         "from_agent": {"bsonType": "string"},
                         "to_agent": {"bsonType": "string"},
                         "reason": {"bsonType": ["string", "null"]},

@@ -197,7 +197,9 @@ class OrchestrationService:
                     "O agente de destino está desativado ou já atuou neste turno; mantive a orientação disponível sem criar um handoff circular."
                 )
                 break
-            handoff = {"conversation_id": conversation_id, "from_agent": current, "to_agent": destination, "reason": result.handoff_reason, "at": utcnow()}
+            # customer_key denormalizado: o Change Stream de /api/events/stream
+            # filtra por dono direto no $match, sem um find_one extra por evento.
+            handoff = {"conversation_id": conversation_id, "customer_key": customer["customer_key"], "from_agent": current, "to_agent": destination, "reason": result.handoff_reason, "at": utcnow()}
             await self.store.insert_one("agent_handoffs", handoff)
             handoff_chain.append(handoff)
             timeline.append(TimelineEvent(category="handoff", title="Retorno controlado" if is_revisit else "Handoff explícito", agent=current, collection="agent_handoffs", op="write", filter={"conversation_id": conversation_id}, result={"to_agent": destination, "revisit": is_revisit}, reason=result.handoff_reason))
@@ -237,7 +239,7 @@ class OrchestrationService:
             global_eligible=global_eligible,
         )
         await self._update_conversation(conversation_id, customer, conversation, masked, response, current, handoff_chain, timeline)
-        usage = {**budget.used_by_agent, "total": budget.total_used}
+        usage = {**budget.used_by_agent, "total": budget.total_used, "cache_read": budget.cache_read_tokens, "cache_write": budget.cache_write_tokens}
         await metrics.increment("tokens.total", budget.total_used)
         await metrics.increment("cache.misses")
         log_cache_decision(conversation_id=conversation_id, customer_key=customer["customer_key"], message=masked, cache="miss", fonte=None, score=None, tokens_economizados=0, memorias_recuperadas=len(long_term), response=response, usage=usage)
@@ -293,7 +295,7 @@ class OrchestrationService:
         current = fanout_key
         await cascade_store_turn(self.store, target=fanout_key, area=customer["area"], customer_key=customer["customer_key"], session_id=conversation_id, intent=None, message=masked, answer=response, timeline=[event.model_dump(mode="json") for event in timeline[tail_start:]], active_agent=current)
         await self._update_conversation(conversation_id, customer, conversation, masked, response, current, [], timeline)
-        usage = {**budget.used_by_agent, "total": budget.total_used}
+        usage = {**budget.used_by_agent, "total": budget.total_used, "cache_read": budget.cache_read_tokens, "cache_write": budget.cache_write_tokens}
         await metrics.increment("tokens.total", budget.total_used)
         await metrics.increment("fanout.turns")
         await metrics.increment("cache.misses")

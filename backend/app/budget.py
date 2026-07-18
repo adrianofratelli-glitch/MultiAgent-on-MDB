@@ -10,6 +10,10 @@ class TurnBudget:
     global_limit: int
     per_agent_limits: dict[str, int]
     used_by_agent: dict[str, int] = field(default_factory=dict)
+    # Telemetria do prompt cache no turno (preenchida pelo LLMGateway) — vai
+    # para ChatResponse.usage e aparece na UI.
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
 
     @property
     def total_used(self) -> int:
@@ -22,6 +26,13 @@ class TurnBudget:
         if self.total_used + tokens > self.global_limit:
             raise BudgetExceeded("budget global do turno excedido")
         self.used_by_agent[agent] = agent_used + tokens
+
+    def reconcile(self, agent: str, estimated: int, actual: int) -> None:
+        """Troca a estimativa heurística (chars/4) pelo uso REAL reportado pela API.
+        Ajuste contábil pós-fato — nunca levanta BudgetExceeded: a chamada já
+        aconteceu; o valor correto só melhora a decisão dos próximos hops."""
+        used = self.used_by_agent.get(agent, 0)
+        self.used_by_agent[agent] = max(0, used - estimated + actual)
 
 
 def estimate_tokens(text: str) -> int:

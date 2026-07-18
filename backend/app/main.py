@@ -172,8 +172,10 @@ async def memory(customer_key: str, customer: dict = Depends(current_customer), 
     return [{key: value for key, value in item.items() if key != "_id"} for item in items]
 
 
-@app.get("/api/guardrails/{view}")
-async def guardrails(view: str, _: dict = Depends(current_customer), store: DataStore = Depends(get_store)):
+# Admin-only: eventos/candidatos/denylist expõem mensagens de OUTROS clientes
+# (tentativas de manipulação, PII mascarada) — não é dado de cliente comum.
+@app.get("/api/guardrails/{view}", dependencies=[Depends(require_admin)])
+async def guardrails(view: str, store: DataStore = Depends(get_store)):
     mapping = {"events": "guardrail_events", "candidates": "guardrail_candidates", "denylist": "guardrail_denylist"}
     collection = mapping.get(view)
     if not collection:
