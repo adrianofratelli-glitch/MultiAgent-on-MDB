@@ -16,3 +16,9 @@ backend/app/__pycache__/
 backend/tests/__pycache__/
 
 docs/Guia-PoV-Multi-Agent.pdf
+
+# Local-only artifacts (internal material, never commit)
+.env.bak
+*.env.bak
+outputs/
+pov-agent-memory-mongodb-template.pdf

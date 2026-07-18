@@ -1,6 +1,6 @@
 # Multi-Agent on MongoDB
 
-I built this PoV to answer a question a few prospects kept asking during multi-agent conversations: "fine, but where does all of this actually *live*?" Most reference architectures answer that with a shopping list — a database for durable state, Redis for session cache, a vector store bolted on the side, maybe a queue to coordinate handoffs. That's four systems to keep in sync before you've written a single line of business logic.
+This PoV answers a question that comes up in almost every multi-agent conversation: "fine, but where does all of this actually *live*?" Most reference architectures answer that with a shopping list — a database for durable state, Redis for session cache, a vector store bolted on the side, maybe a queue to coordinate handoffs. That's four systems to keep in sync before you've written a single line of business logic.
 
 This PoV takes the opposite bet: **MongoDB Atlas is not just where the data lives — it's where the agents coordinate.** Routing rules, agent configuration, conversation memory, handoff history, semantic cache, guardrail decisions, audit traces, vector and hybrid search all live in MongoDB, as documents, queryable the same way you'd query an order or an invoice.
 
@@ -38,6 +38,24 @@ The screenshot below is the moment that usually lands the pitch: a support agent
 Every agent's config — model, persona, tools, budget — is a document in `ai_brain.agent_registry`. You can toggle one off or swap its model mid-demo without touching a line of code.
 
 ![Registro de agentes com modelo, escopo e ativação individual](docs/screenshots/04-agents-registry.png)
+
+## Anatomy of one turn
+
+Why MongoDB instead of a queue or a workflow engine? Because every step below is a document write you can query, audit, and replay — the coordination *is* the data:
+
+```mermaid
+flowchart TD
+    A[Customer message] --> B{Input guardrail<br/>denylist + near-miss + LLM classifier}
+    B -- blocked --> Z[Refusal + guardrail_events]
+    B -- pass --> C{Semantic cache<br/>session → customer → global}
+    C -- hit --> Y[Replay stored answer + timeline]
+    C -- miss --> D{Routing<br/>deterministic rules first,<br/>orchestrator LLM only if no rule matched}
+    D -- compound & independent --> E[Fan-out: order + billing in parallel]
+    D -- single or dependent --> F[Agent chain, up to 4 hops<br/>support → product → order → billing/logistics]
+    F --> G[Every handoff → agent_handoffs<br/>Change Stream → live UI]
+    E --> H[Store turn: cache + memory + traces + metrics]
+    G --> H
+```
 
 ## Stack
 
