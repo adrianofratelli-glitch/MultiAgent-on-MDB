@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     mongodb_db: str = "multi_agent_poc"
     mongodb_brain_db: str = "ai_brain"
     anthropic_api_key: str = ""
+    anthropic_base_url: str = ""
     jwt_secret: str = "desenvolvimento-inseguro-troque-este-segredo"
     jwt_ttl_minutes: int = 60
     auth_required: bool = True

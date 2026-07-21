@@ -10,7 +10,11 @@ class LLMGateway:
     """Gateway Anthropic com retry transitório, fallback e prompt cache."""
 
     def __init__(self, settings: Settings):
-        self.client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key, default_headers={"api-key": settings.anthropic_api_key}) if settings.anthropic_api_key else None
+        self.client = anthropic.AsyncAnthropic(
+            api_key="dummy",  # Grove/Azure APIM auth vai no header api-key, não x-api-key
+            base_url=settings.anthropic_base_url or None,
+            default_headers={"api-key": settings.anthropic_api_key},
+        ) if settings.anthropic_api_key else None
 
     async def complete(
         self,
