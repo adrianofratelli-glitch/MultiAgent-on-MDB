@@ -120,6 +120,16 @@ async def cascade_long_term_context(store: DataStore, *, customer_key: str, mess
         )
 
 
+async def cascade_store_episode(store: DataStore, *, customer_key: str, message: str, answer: str) -> None:
+    """Grava um episódio na memória de longo prazo (cross-sessão, por customer_key) — o lado da
+    cascata que faltava: cascade_long_term_context() já LÊ daqui, mas nada ESCREVIA. Sem isso a
+    collection ficava sempre vazia e o painel de governança mentia sobre a 3ª camada da cascata."""
+    await store.insert_one(
+        "long_term_memory",
+        {"customer_key": customer_key, "text": f"Pergunta: {message}\nResposta: {answer}", "created_at": utcnow()},
+    )
+
+
 async def cascade_store_turn(
     store: DataStore,
     *,

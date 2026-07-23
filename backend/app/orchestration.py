@@ -4,7 +4,7 @@ from time import perf_counter
 
 from .agents import RUNNERS
 from .budget import TurnBudget, estimate_tokens
-from .cascade import cascade_long_term_context, cascade_lookup, cascade_store_turn
+from .cascade import cascade_long_term_context, cascade_lookup, cascade_store_episode, cascade_store_turn
 from .database import DataStore, utcnow
 from .guardrails import check_input, check_output
 from .langfuse_client import log_cache_decision
@@ -133,6 +133,7 @@ class OrchestrationService:
         if cascade.hit:
             await metrics.increment(f"agent.{target}.cache_hits")
             await metrics.increment(f"cache.hits.{cascade.fonte}")
+            await metrics.increment("tokens.economizados", cascade.tokens_economizados)
             timeline.append(TimelineEvent(category="cache", title=f"Cascata semântica: HIT ({cascade.fonte})", agent=target, collection="short_term_memory" if cascade.fonte == "curto_prazo" else "semantic_cache", op="vectorSearch", filter={"session_id": conversation_id, "agent": target}, result={"hit": True, "fonte": cascade.fonte, "score": cascade.score}))
             response = cascade.answer or ""
             cached_active_agent = cascade.active_agent or target
@@ -238,6 +239,8 @@ class OrchestrationService:
             active_agent=current,
             global_eligible=global_eligible,
         )
+        await cascade_store_episode(self.store, customer_key=customer["customer_key"], message=masked, answer=response)
+        timeline.append(TimelineEvent(category="memory", title="Episódio gravado em memória de longo prazo", agent=current, collection="long_term_memory", op="write", filter={"customer_key": customer["customer_key"]}, result={}))
         await self._update_conversation(conversation_id, customer, conversation, masked, response, current, handoff_chain, timeline)
         usage = {**budget.used_by_agent, "total": budget.total_used, "cache_read": budget.cache_read_tokens, "cache_write": budget.cache_write_tokens}
         await metrics.increment("tokens.total", budget.total_used)

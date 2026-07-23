@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { api } from './api.js';
+import AiBrainInspector, { AiBrainHighlights } from './components/AiBrainPanel.jsx';
 import Inspector from './components/Inspector.jsx';
 import Timeline from './components/Timeline.jsx';
 
@@ -126,6 +127,7 @@ function MetricsPage({ metrics, evalRuns, adminMode }) {
     ['buscas nativas', nativeSearches, 'Vector Search + híbrida RRF'],
     ['latência p95', route.p95_ms ? `${Math.round(route.p95_ms)} ms` : '—', `${route.count || 0} amostras`],
     ['cache hit rate', cacheTotal ? `${Math.round((cacheHits / cacheTotal) * 100)}%` : '—', `${cacheHits} hits · ${cacheMisses} misses`],
+    ['tokens economizados', (counters['tokens.economizados'] || 0).toLocaleString('pt-BR'), 'estimados, evitados por HIT na cascata'],
     ['guardrails', counters['guardrails.blocked'] || 0, 'turnos bloqueados'],
   ];
 
@@ -336,8 +338,10 @@ export default function App() {
               ))}
             </div>
           )}
+          <AiBrainHighlights customer={customer} lastRun={lastRun} timeline={timeline} />
           <div className="workspace"><ChatPanel key={customer?.customer_key} {...{ messages, input, setInput, send, busy }} customerName={customer?.name} demos={demoScenarios} /><section className="timeline-panel"><div className="panel-label"><span>raio-x do turno</span><code>{timeline.length} eventos</code></div><Timeline events={timeline} /></section><Inspector tab={inspector} {...data} /></div>
           <div className="inspector-tabs">{['agents', 'handoffs', 'memory', 'guardrails', 'metrics'].map((item) => <button className={inspector === item ? 'active' : ''} onClick={() => setInspector(item)} key={item}>{item}</button>)}</div>
+          <AiBrainInspector customerKey={customer?.customer_key} run={lastRun} />
         </>}
         {nav === 'Agentes' && <AgentsPage agents={agents} adminMode={adminMode} setAdminMode={setAdminMode} reload={loadCore} />}
         {nav === 'Guardrails' && <DataPage title="Segurança antes da inteligência." subtitle="Entrada é validada uma vez por turno, antes de qualquer modelo, memória ou trace.">{guardrails.length ? <pre>{JSON.stringify(guardrails, null, 2)}</pre> : <p className="inspector-empty">Nenhum evento ainda — só aparece aqui quando uma mensagem é de fato bloqueada. Tente o prompt de guardrail sugerido para a identidade Carla ou Diego.</p>}</DataPage>}

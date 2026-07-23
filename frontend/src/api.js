@@ -29,6 +29,7 @@ export const api = {
   metrics: () => request('/api/metrics'),
   handoffs: (id) => request(`/api/handoffs?conversation_id=${encodeURIComponent(id)}`),
   memory: (key) => request(`/api/memory/${encodeURIComponent(key)}`),
+  inspector: (view) => request(`/api/inspector/${encodeURIComponent(view)}`),
   latestConversation: () => request('/api/conversations/latest'),
   guardrails: (view = 'events') => request(`/api/guardrails/${view}`, { headers: { 'X-Admin-Key': import.meta.env.VITE_ADMIN_KEY || '' } }),
   chat: (message, conversationId) => request('/api/chat', { method: 'POST', body: JSON.stringify({ message, conversation_id: conversationId || null }) }),

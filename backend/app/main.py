@@ -172,6 +172,34 @@ async def memory(customer_key: str, customer: dict = Depends(current_customer), 
     return [{key: value for key, value in item.items() if key != "_id"} for item in items]
 
 
+# Painel "ai_brain" da demo: mostra ao cliente, coleção por coleção, o que a cascata
+# checou ANTES de gastar token com o LLM. Sempre filtrado pelo customer_key do JWT —
+# nunca aceita customer_key vindo do path para outra identidade, mesmo doc próprio.
+INSPECTOR_COLLECTIONS = {
+    "cache": "semantic_cache",
+    "short": "short_term_memory",
+    "long": "long_term_memory",
+    "facts": "customer_memory",
+}
+
+
+@app.get("/api/inspector/{view}")
+async def inspector(view: str, customer: dict = Depends(current_customer), store: DataStore = Depends(get_store)):
+    collection = INSPECTOR_COLLECTIONS.get(view)
+    if not collection:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "visão de inspetor desconhecida")
+    query = {"customer_key": customer["customer_key"]}
+    if view == "facts":
+        query["active"] = True
+    items = await store.find_many(collection, query, limit=30, sort=[("created_at", -1)])
+    return {
+        "view": view,
+        "collection": collection,
+        "customer_key": customer["customer_key"],
+        "items": [{key: value for key, value in item.items() if key != "_id"} for item in items],
+    }
+
+
 # Admin-only: eventos/candidatos/denylist expõem mensagens de OUTROS clientes
 # (tentativas de manipulação, PII mascarada) — não é dado de cliente comum.
 @app.get("/api/guardrails/{view}", dependencies=[Depends(require_admin)])
