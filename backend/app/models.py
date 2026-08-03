@@ -18,6 +18,7 @@ class AgentUpdate(BaseModel):
     fallback_model: str | None = Field(default=None, max_length=100)
     persona: str | None = Field(default=None, max_length=4000)
     max_turn_tokens: int | None = Field(default=None, ge=128, le=8192)
+    max_output_tokens: int | None = Field(default=None, ge=128, le=8192)
 
 
 class OrderStatusUpdate(BaseModel):

@@ -43,7 +43,7 @@ class LLMGateway:
                 try:
                     response = await self.client.messages.create(
                         model=model,
-                        max_tokens=min(agent["max_turn_tokens"], budget.global_limit - budget.total_used),
+                        max_tokens=min(agent.get("max_output_tokens") or agent["max_turn_tokens"], budget.global_limit - budget.total_used),
                         system=[{"type": "text", "text": system_static, "cache_control": {"type": "ephemeral"}}, {"type": "text", "text": dynamic_context}],
                         messages=[{"role": "user", "content": user_message}],
                     )

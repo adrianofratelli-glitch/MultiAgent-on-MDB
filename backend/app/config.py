@@ -22,7 +22,7 @@ class Settings(BaseSettings):
     jwt_ttl_minutes: int = 60
     auth_required: bool = True
     admin_api_key: str = "admin-demo"
-    global_turn_token_budget: int = 6000
+    global_turn_token_budget: int = 20000
     turn_deadline_seconds: int = 120
     rate_limit_requests: int = 30
     rate_limit_window_seconds: int = 60

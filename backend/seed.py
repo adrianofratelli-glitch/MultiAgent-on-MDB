@@ -61,7 +61,7 @@ async def seed(store: DataStore, *, create_indexes: bool = True) -> list[str]:
     await store.replace_one(
         "model_config",
         {"key": "default"},
-        {"key": "default", "default_model": "claude-haiku-4-5", "global_turn_tokens": 6000},
+        {"key": "default", "default_model": "claude-haiku-4-5", "global_turn_tokens": 20000},
         brain=True,
         upsert=True,
     )
@@ -139,6 +139,22 @@ async def create_search_indexes(store: DataStore) -> list[str]:
                 name="short_term_autoembed_v1",
                 type="vectorSearch",
                 definition={"fields": [{"type": "autoEmbed", "modality": "text", "path": "question_text", "model": "voyage-4", "numDimensions": 1024, "similarity": "cosine", "indexingMethod": "flat"}, {"type": "filter", "path": "session_id"}, {"type": "filter", "path": "customer_key"}, {"type": "filter", "path": "agent"}]},
+            ),
+        ),
+        (
+            # Denylist semântico: a lista lexical só pega substring exata; este índice é o que
+            # bloqueia uma paráfrase sem depender do classificador LLM (que é pulado quando a
+            # mensagem já bateu numa regra de roteamento, e não existe em DEMO_MODE).
+            "guardrail_denylist",
+            SearchIndexModel(
+                name="denylist_autoembed_v1",
+                type="vectorSearch",
+                # `layer` é filtro porque as duas camadas NÃO podem se misturar: as entradas
+                # lexicais são fragmentos curtos ("sem nota fiscal") que, como vetor, ficam
+                # colados em pedido legítimo ("pode me enviar a nota fiscal da minha compra?")
+                # — medido em 0.8263, acima de ataque real. Elas servem para substring; a busca
+                # vetorial só percorre as frases escritas como intenção completa.
+                definition={"fields": [{"type": "autoEmbed", "modality": "text", "path": "phrase", "model": "voyage-4", "numDimensions": 1024, "similarity": "cosine", "indexingMethod": "flat"}, {"type": "filter", "path": "area"}, {"type": "filter", "path": "active"}, {"type": "filter", "path": "layer"}]},
             ),
         ),
         (
