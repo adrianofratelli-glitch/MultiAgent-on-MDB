@@ -87,7 +87,7 @@ Marca `warmup: true` só nos cenários **read-only**. Escrita, guardrail e cadei
 
 ## O inspetor precisa distinguir as duas primeiras abas
 
-`semantic_cache` e `short_term_memory` guardam **os mesmos textos** — todo turno grava nas duas. O que muda é como a cascata lê cada uma, e a tela tem que dizer isso, senão a primeira pergunta de quem abre o painel é "por que está duplicado?".
+Todo turno entra em `short_term_memory`, mas apenas respostas estáveis e explicitamente elegíveis entram em `semantic_cache`, marcadas com `cache_policy: stable_v1`. Consultas de estado operacional, handoffs, uso de memória e writes ficam somente no curto prazo, evitando replay de pedido/fatura desatualizados em outra conversa. Documentos de políticas anteriores permanecem até o TTL, mas não participam da leitura nem aparecem no inspetor.
 
 Cada aba carrega uma legenda própria explicando o corte e o escopo, e cada documento mostra:
 

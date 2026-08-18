@@ -196,8 +196,6 @@ E repara no `reason` aceitando `["string", "null"]`: handoff sem motivo é poss�
 
 ### 1. A cascata de cache — uma consulta só decide HIT/MISS
 
-Esta é a query mais importante da PoV. Ela roda **antes de qualquer chamada de LLM**.
-
 ```python
 [
   # nível 1 — curto prazo: reformulação da mesma pergunta, nesta sessão
@@ -258,13 +256,13 @@ Isso **não é resposta pronta**, é input pro prompt — por isso não conta co
 
 ### 3. As escritas da cascata — `cascade_store_turn()`
 
-Três `replace_one` com `upsert=True`, e a diferença entre eles é o argumento inteiro do escopo de cache:
+Até três `replace_one` com `upsert=True`, conforme a elegibilidade do turno:
 
 ```python
 # sempre: curto prazo, chaveado por sessão
 {"session_id": …, "customer_key": …, "agent": target, "question_norm": …}
 
-# sempre: cache pessoal — cobre repetir a pergunta numa conversa NOVA
+# só quando elegível: cache pessoal — cobre repetir uma resposta estável numa conversa NOVA
 {"agent": target, "customer_key": …, "scope": "customer", "question_norm": …}
 
 # só quando elegível: cache público
@@ -273,7 +271,7 @@ Três `replace_one` com `upsert=True`, e a diferença entre eles é o argumento 
 
 Todos gravam `expires_at = now + 24h`, e o documento carrega `answer`, `active_agent` e **a cauda da timeline** do turno — é isso que faz o HIT reproduzir o raio-x completo na UI em vez de mostrar uma bolha de texto solta.
 
-O escopo `global` exige que **intenção E evidências** provem que a resposta é pública: intenção em `GLOBAL_CACHE_INTENTS` (catálogo e KB), nenhum uso de memória do cliente, nenhum longo prazo recuperado, nenhum fato novo escrito, nenhum handoff, mesmo agente do começo ao fim, **nenhum evento com `op == "write"`** — e o chamador precisa optar explicitamente (`global_eligible=True`).
+Qualquer gravação em `semantic_cache` exige que **intenção E evidências** provem que a resposta é estável: intenção em `GLOBAL_CACHE_INTENTS` (catálogo e KB), nenhum uso de memória do cliente, nenhum longo prazo recuperado, nenhum fato novo escrito, nenhum handoff, mesmo agente do começo ao fim, **nenhum evento com `op == "write"`** — e o chamador precisa optar explicitamente (`cache_eligible=True`). Consultas mutáveis de pedido, fatura, garantia, entrega e fidelidade nunca são promovidas. A leitura também exige `cache_policy: stable_v1`, portanto documentos antigos da política irrestrita deixam de dar HIT imediatamente, sem exclusão destrutiva.
 
 E `cascade_store_episode()` grava o episódio de longo prazo:
 
@@ -458,7 +456,7 @@ Cada uma bate exatamente num índice composto já existente. Falha de qualquer u
 | `multiagent_brain.guardrail_policies` (area `financeiro`) | `vector_threshold` | **0.7791** | idem, com `threshold` lexical mais rígido (0.82 contra 0.86) |
 | ambas | `semantic_fail_mode` | `closed` | camada semântica fora ⇒ bloqueia pelo caminho lexical |
 
-O `threshold` (0.86 / 0.82) é **Jaccard lexical**, e ele existe só como fallback do `DEMO_MODE`/CI. Com o vetorial no ar ele vira ruído — por isso o score que aparece no painel é o **vetorial** quando existe. Mostrar 0.1 de Jaccard numa frase que o guardrail avaliou em 0.77 dá a impressão de que ele não viu nada.
+O `threshold` (0.86 / 0.82) é ** lexical**, e ele existe só como fallback do `DEMO_MODE`/CI. Com o vetorial no ar ele vira ruído — por isso o score que aparece no painel é o **vetorial** quando existe. Mostrar 0.1 de Jaccard numa frase que o guardrail avaliou em 0.77 dá a impressão de que ele não viu nada.
 
 Quem mede é o `backend/calibrate_thresholds.py`, com 12 sondas rotuladas `(deve_bloquear, texto, area)` e **o mesmo pré-filtro do runtime**. Ele calcula `max(negativos)` e `min(positivos)` e sugere o ponto médio.
 

@@ -48,12 +48,10 @@ cp .env.example .env
 python3.12 -m venv .venv && source .venv/bin/activate
 pip install -r backend/requirements.txt
 python backend/seed.py
-cd backend && python run.py     # porta 8031
+./start.sh                      # backend :8031 + frontend :5191
 ```
 
-```bash
-cd frontend && npm install && npm run dev   # porta 5191
-```
+O launcher usa backend sem reload e build otimizado do frontend por padrão. Para desenvolver com reload/HMR, rode `POV_DEV=1 ./start.sh`; o build só é refeito quando fontes, lockfile ou configuração mudam.
 
 Sem cluster Atlas? `DEMO_MODE=1 AUTH_REQUIRED=1 python run.py` roda os mesmos contratos em memória (sem Vector Search / Change Streams). É o que a CI usa.
 

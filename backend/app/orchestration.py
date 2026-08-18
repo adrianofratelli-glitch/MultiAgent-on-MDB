@@ -4,7 +4,7 @@ from time import perf_counter
 
 from .agents import RUNNERS
 from .budget import TurnBudget, estimate_tokens
-from .cascade import (cascade_long_term_context, cascade_lookup, cascade_store_episode,
+from .cascade import (GLOBAL_CACHE_INTENTS, cascade_long_term_context, cascade_lookup, cascade_store_episode,
                       cascade_store_short_term, cascade_store_turn)
 from .database import DataStore, utcnow
 from .guardrails import check_input, check_output
@@ -304,8 +304,9 @@ class OrchestrationService:
             response = "A resposta foi retida pela política de segurança."
 
         turn_tail = timeline[tail_start:]
-        global_eligible = (
-            not memory
+        cache_eligible = (
+            decision.intent in GLOBAL_CACHE_INTENTS
+            and not memory
             and not written_facts
             and not long_term
             and not handoff_chain
@@ -323,7 +324,7 @@ class OrchestrationService:
             answer=response,
             timeline=[event.model_dump(mode="json") for event in turn_tail],
             active_agent=current,
-            global_eligible=global_eligible,
+            cache_eligible=cache_eligible,
         )
         await cascade_store_episode(self.store, customer_key=customer["customer_key"], message=masked, answer=response)
         timeline.append(TimelineEvent(category="memory", title="Episódio gravado em memória de longo prazo", agent=current, collection="long_term_memory", op="write", filter={"customer_key": customer["customer_key"]}, result={}))

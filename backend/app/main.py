@@ -3,7 +3,7 @@ import json
 import logging
 import sys
 import uuid
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from time import perf_counter
 from typing import Annotated
@@ -13,6 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from .budget import BudgetExceeded
+from .cascade import CACHE_POLICY
 from .config import get_settings
 from .database import DataStore, get_store, set_store, utcnow
 from .llm import LLMGateway
@@ -215,6 +216,8 @@ async def inspector(
     if not collection:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "visão de inspetor desconhecida")
     query = {"customer_key": customer["customer_key"]}
+    if view == "cache":
+        query["cache_policy"] = CACHE_POLICY
     if view == "facts":
         query["active"] = True
     if view == "short":
@@ -244,17 +247,53 @@ async def guardrails(view: str, store: DataStore = Depends(get_store)):
     return [{key: value for key, value in item.items() if key != "_id"} for item in items]
 
 
+async def handoff_event_stream(request: Request, store: DataStore, customer_key: str, heartbeat_seconds: float = 15):
+    """Adapt the Change Stream to SSE with immediate confirmation and heartbeats."""
+    queue: asyncio.Queue[tuple[str, object | None]] = asyncio.Queue()
+
+    async def pump_handoffs() -> None:
+        try:
+            async for event in store.watch_handoffs(customer_key):
+                await queue.put(("event", event))
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            await queue.put(("error", exc))
+        finally:
+            await queue.put(("done", None))
+
+    pump = asyncio.create_task(pump_handoffs())
+    try:
+        # Confirm immediately and keep proxies/browsers alive while the stream is idle.
+        yield ": connected\n\n"
+        while not await request.is_disconnected():
+            try:
+                kind, payload = await asyncio.wait_for(queue.get(), timeout=heartbeat_seconds)
+            except TimeoutError:
+                yield ": keepalive\n\n"
+                continue
+            if kind == "event":
+                yield f"data: {json.dumps(payload, default=str)}\n\n"
+            elif kind == "error":
+                log("change_stream_error", customer_key=customer_key, error=type(payload).__name__)
+                break
+            else:
+                break
+    finally:
+        pump.cancel()
+        with suppress(asyncio.CancelledError):
+            await pump
+
+
 @app.get("/api/events/stream")
 async def events_stream(request: Request, customer: Annotated[dict, Depends(current_customer)], store: DataStore = Depends(get_store)):
     """Feed ao vivo de coordenação: Change Stream do Atlas em agent_handoffs, via SSE."""
 
-    async def generator():
-        async for event in store.watch_handoffs(customer["customer_key"]):
-            if await request.is_disconnected():
-                break
-            yield f"data: {json.dumps(event, default=str)}\n\n"
-
-    return StreamingResponse(generator(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+    return StreamingResponse(
+        handoff_event_stream(request, store, customer["customer_key"]),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.get("/api/metrics")

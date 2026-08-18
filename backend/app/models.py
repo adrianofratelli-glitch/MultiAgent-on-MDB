@@ -22,7 +22,7 @@ class AgentUpdate(BaseModel):
 
 
 class OrderStatusUpdate(BaseModel):
-    order_id: str
+    order_id: str = Field(min_length=5, max_length=64)
     status: Literal["processando", "enviado", "entregue", "troca_solicitada", "reembolsado"]
 
     @field_validator("order_id")
@@ -64,4 +64,3 @@ class ChatResponse(BaseModel):
     timeline: list[TimelineEvent]
     usage: dict[str, int]
     suggestions: list[Suggestion] = []
-

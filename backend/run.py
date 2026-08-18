@@ -1,3 +1,5 @@
+import os
+
 import uvicorn
 
 from app.config import get_settings
@@ -10,5 +12,7 @@ if __name__ == "__main__":
         "app.main:app",
         host=settings.api_host,
         port=settings.api_port,
-        reload=settings.environment == "development",
+        # File watching duplicates the process and scans the worktree. Keep it
+        # opt-in for code editing; a normal PoV run needs only one server.
+        reload=os.getenv("POV_DEV", "0") == "1",
     )

@@ -1,6 +1,8 @@
+from datetime import timedelta
+
 from app.cascade import cascade_lookup, cascade_store_turn
 from app.config import Settings
-from app.database import DataStore
+from app.database import DataStore, utcnow
 from app.llm import LLMGateway
 from app.orchestration import OrchestrationService
 
@@ -11,6 +13,9 @@ async def test_personalized_intent_stays_session_scoped_and_never_leaks():
 
     same_session = await cascade_lookup(store, target="order_agent", area="varejo", customer_key="ana", session_id="s1", message="onde está meu pedido")
     assert same_session.hit and same_session.fonte == "curto_prazo"
+
+    same_customer_new_session = await cascade_lookup(store, target="order_agent", area="varejo", customer_key="ana", session_id="s2", message="onde está meu pedido")
+    assert same_customer_new_session.hit is False
 
     other_session = await cascade_lookup(store, target="order_agent", area="varejo", customer_key="bruno", session_id="s2", message="onde está meu pedido")
     assert other_session.hit is False
@@ -31,17 +36,40 @@ async def test_global_cache_requires_explicit_safe_eligibility():
     without_approval = await cascade_lookup(store, target="support_agent", area="varejo", customer_key="bruno", session_id="s2", message="como parear bluetooth")
     assert without_approval.hit is False
 
-    await cascade_store_turn(store, target="support_agent", area="varejo", customer_key="ana", session_id="s1", intent="suporte", message="como redefinir bluetooth", answer="orientação pública", timeline=[], active_agent="support_agent", global_eligible=True)
+    await cascade_store_turn(store, target="support_agent", area="varejo", customer_key="ana", session_id="s1", intent="suporte", message="como redefinir bluetooth", answer="orientação pública", timeline=[], active_agent="support_agent", cache_eligible=True)
     approved = await cascade_lookup(store, target="support_agent", area="varejo", customer_key="bruno", session_id="s2", message="como redefinir bluetooth")
     assert approved.hit and approved.fonte == "cache"
 
 
 async def test_warranty_is_never_global_even_when_caller_requests_it():
     store = DataStore(Settings(demo_mode=True))
-    await cascade_store_turn(store, target="warranty_agent", area="varejo", customer_key="ana", session_id="s1", intent="garantia", message="meu pedido está na garantia?", answer="resposta da Ana", timeline=[], active_agent="warranty_agent", global_eligible=True)
+    await cascade_store_turn(store, target="warranty_agent", area="varejo", customer_key="ana", session_id="s1", intent="garantia", message="meu pedido está na garantia?", answer="resposta da Ana", timeline=[], active_agent="warranty_agent", cache_eligible=True)
+
+    same_customer_new_session = await cascade_lookup(store, target="warranty_agent", area="varejo", customer_key="ana", session_id="s2", message="meu pedido está na garantia?")
+    assert same_customer_new_session.hit is False
 
     leaked = await cascade_lookup(store, target="warranty_agent", area="varejo", customer_key="bruno", session_id="s2", message="meu pedido está na garantia?")
     assert leaked.hit is False
+
+
+async def test_cache_entry_from_previous_unrestricted_policy_is_ignored():
+    store = DataStore(Settings(demo_mode=True))
+    await store.insert_one(
+        "semantic_cache",
+        {
+            "agent": "order_agent",
+            "area": "varejo",
+            "customer_key": "ana",
+            "scope": "customer",
+            "question_text": "onde está meu pedido",
+            "question_norm": "onde esta meu pedido",
+            "answer": "estado possivelmente antigo",
+            "expires_at": utcnow() + timedelta(hours=1),
+        },
+    )
+
+    result = await cascade_lookup(store, target="order_agent", area="varejo", customer_key="ana", session_id="s2", message="onde está meu pedido")
+    assert result.hit is False
 
 
 async def test_foreign_conversation_id_is_replaced_instead_of_hijacked():

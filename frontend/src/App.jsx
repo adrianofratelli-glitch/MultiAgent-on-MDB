@@ -199,7 +199,8 @@ export default function App() {
   const [suggestions, setSuggestions] = useState([]);
   const [adminMode, setAdminMode] = useState(false);
   const [liveEvents, setLiveEvents] = useState([]);
-  const [liveOn, setLiveOn] = useState(false);
+  const [liveStatus, setLiveStatus] = useState('connecting');
+  const [liveError, setLiveError] = useState('');
   const [evalRuns, setEvalRuns] = useState([]);
 
   const loadCore = async () => {
@@ -235,24 +236,49 @@ export default function App() {
 
   useEffect(() => {
     if (!customer) return undefined;
-    const controller = new AbortController();
     let cancelled = false;
-    const connect = async () => {
-      while (!cancelled && !controller.signal.aborted) {
+    let controller = null;
+    let running = false;
+    const connect = async (activeController) => {
+      running = true;
+      while (!cancelled && !activeController.signal.aborted) {
         try {
-          setLiveOn(true);
+          setLiveStatus('connecting');
           await api.streamEvents((event) => {
             setLiveEvents([{ ...event, receivedAt: Date.now() }]);
-          }, controller.signal);
+          }, activeController.signal, () => {
+            setLiveStatus('live');
+            setLiveError('');
+          });
         } catch (err) {
-          // conexão caiu (servidor reiniciou, rede oscilou) — reconecta em vez de ficar "offline" pra sempre
+          if (!activeController.signal.aborted) setLiveError(err.message || 'Conexão encerrada');
         }
-        setLiveOn(false);
-        if (!cancelled && !controller.signal.aborted) await new Promise((resolve) => setTimeout(resolve, 3000));
+        if (!cancelled && !activeController.signal.aborted) setLiveStatus('offline');
+        if (!cancelled && !activeController.signal.aborted) await new Promise((resolve) => setTimeout(resolve, 3000));
+      }
+      running = false;
+      if (!cancelled && document.visibilityState === 'visible') {
+        setTimeout(syncConnection, 0);
       }
     };
-    connect();
-    return () => { cancelled = true; controller.abort(); setLiveOn(false); };
+    const syncConnection = () => {
+      if (document.visibilityState === 'visible') {
+        if (running) return;
+        controller = new AbortController();
+        connect(controller);
+      } else {
+        controller?.abort();
+        controller = null;
+        setLiveStatus('offline');
+      }
+    };
+    syncConnection();
+    document.addEventListener('visibilitychange', syncConnection);
+    return () => {
+      cancelled = true;
+      controller?.abort();
+      document.removeEventListener('visibilitychange', syncConnection);
+    };
   }, [customer?.customer_key]);
 
   const newConversation = () => {
@@ -300,7 +326,7 @@ export default function App() {
 
   return (
     <>
-      <nav className="top-nav"><div className="nav-inner"><button className="brand" onClick={() => setNav('Chat')}><span className="leaf">◆</span><span>MongoDB</span><b>Agent Control Plane</b></button><div className="nav-tabs">{NAV.map((item) => <button className={nav === item ? 'active' : ''} key={item} onClick={() => setNav(item)}>{item}</button>)}</div><label className="identity-select">identidade<select value={customer?.customer_key || 'ana'} onChange={(event) => switchIdentity(event.target.value)}>{IDENTITIES.map((key) => <option key={key} value={key}>{key}</option>)}</select></label><div className="live-pill" title="Change Stream do MongoDB Atlas em agent_handoffs"><span className={liveOn ? 'ok' : ''} />{liveOn ? 'ao vivo' : 'offline'}</div><div className="health-pill"><span className={health ? 'ok' : ''} />{health ? `${health.storage} · ok` : 'conectando'}</div></div></nav>
+      <nav className="top-nav"><div className="nav-inner"><button className="brand" onClick={() => setNav('Chat')}><span className="leaf">◆</span><span>MongoDB</span><b>Agent Control Plane</b></button><div className="nav-tabs">{NAV.map((item) => <button className={nav === item ? 'active' : ''} key={item} onClick={() => setNav(item)}>{item}</button>)}</div><label className="identity-select">identidade<select value={customer?.customer_key || 'ana'} onChange={(event) => switchIdentity(event.target.value)}>{IDENTITIES.map((key) => <option key={key} value={key}>{key}</option>)}</select></label><div className="live-pill" title={liveError || 'Change Stream do MongoDB Atlas em agent_handoffs'}><span className={liveStatus === 'live' ? 'ok' : liveStatus === 'connecting' ? 'connecting' : ''} />{liveStatus === 'live' ? 'ao vivo' : liveStatus === 'connecting' ? 'conectando' : 'offline'}</div><div className="health-pill"><span className={health ? 'ok' : ''} />{health ? `${health.storage} · ok` : 'conectando'}</div></div></nav>
       <main className="content">
         {error && <div className="error-banner">{error}<button onClick={() => setError('')}>×</button></div>}
         {nav === 'Chat' && <>

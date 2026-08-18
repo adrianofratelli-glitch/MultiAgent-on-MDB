@@ -39,8 +39,14 @@ export const api = {
   chat: (message, conversationId) => request('/api/chat', { method: 'POST', body: JSON.stringify({ message, conversation_id: conversationId || null }) }),
   updateAgent: (key, update) => request(`/api/admin/agents/${key}`, { method: 'PATCH', headers: { 'X-Admin-Key': import.meta.env.VITE_ADMIN_KEY || '' }, body: JSON.stringify(update) }),
   evalRuns: () => request('/api/eval/runs', { headers: { 'X-Admin-Key': import.meta.env.VITE_ADMIN_KEY || '' } }),
-  async streamEvents(onEvent, signal) {
+  async streamEvents(onEvent, signal, onOpen) {
     const response = await fetch(`${BASE}/api/events/stream`, { headers: { Authorization: `Bearer ${token}` }, signal });
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      throw new Error(data.detail || `Feed ao vivo indisponível (HTTP ${response.status})`);
+    }
+    if (!response.body) throw new Error('Feed ao vivo sem corpo de resposta');
+    onOpen?.();
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';

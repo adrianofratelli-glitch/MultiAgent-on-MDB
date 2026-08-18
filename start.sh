@@ -24,7 +24,19 @@ source .venv/bin/activate
 (cd backend && python run.py) &
 BACKEND_PID=$!
 
-(cd frontend && npm run dev) &
+if [ "${POV_DEV:-0}" != "1" ] && {
+  [ ! -f frontend/dist/index.html ] ||
+  [ -n "$(find frontend/src -type f -newer frontend/dist/index.html -print -quit)" ] ||
+  [ frontend/package-lock.json -nt frontend/dist/index.html ] ||
+  [ frontend/package.json -nt frontend/dist/index.html ];
+}; then
+  (cd frontend && npm run build)
+fi
+if [ "${POV_DEV:-0}" = "1" ]; then
+  (cd frontend && exec node_modules/.bin/vite --host 127.0.0.1 --port 5191 --strictPort) &
+else
+  (cd frontend && exec node_modules/.bin/vite preview --host 127.0.0.1 --port 5191 --strictPort) &
+fi
 FRONTEND_PID=$!
 
 trap "kill $BACKEND_PID $FRONTEND_PID 2>/dev/null" EXIT INT TERM

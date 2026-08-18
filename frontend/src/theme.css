@@ -50,6 +50,7 @@ pre { white-space: pre-wrap; word-break: break-word; }
 .live-pill { display: flex; align-items: center; gap: 7px; padding: 6px 10px; color: var(--text-muted); border: 1px solid var(--border-subtle); border-radius: 20px; font: 500 10px 'JetBrains Mono'; text-transform: uppercase; }
 .live-pill > span { width: 7px; height: 7px; border-radius: 50%; background: var(--teal); opacity: 0.3; }
 .live-pill > span.ok { opacity: 1; box-shadow: 0 0 8px var(--teal); animation: pulse 1.6s ease-in-out infinite; }
+.live-pill > span.connecting { opacity: .65; animation: pulse 1s ease-in-out infinite; }
 @keyframes pulse { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.4); } }
 .live-feed { margin-top: 16px; padding: 14px 16px; background: var(--bg-card); border: 1px solid var(--border-accent); border-radius: 14px; display: flex; flex-direction: column; gap: 8px; }
 .live-feed-item { display: flex; align-items: center; gap: 8px; font: 500 11px 'JetBrains Mono'; color: var(--text-sec); }

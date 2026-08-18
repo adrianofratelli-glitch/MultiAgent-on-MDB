@@ -62,11 +62,10 @@ const INSP_TABS = [
   { key: 'facts', label: 'customer_memory' },
 ];
 
-// Cada turno grava em short_term_memory E em semantic_cache, então as duas abas
-// mostram os mesmos textos — o que muda é COMO a cascata lê cada uma. Sem esta
-// legenda, quem abre o inspetor conclui que uma das duas está duplicada à toa.
+// Todo turno entra na memória curta. O cache semântico recebe somente respostas
+// estáveis e explicitamente elegíveis; estado operacional, handoffs e writes ficam fora.
 const INSP_HINTS = {
-  cache: 'Vale ENTRE conversas. Buscado sem filtro de sessão, com corte rígido (0.80) — pega a mesma pergunta numa conversa nova. Texto idêntico dá HIT sempre, por match exato.',
+  cache: 'Respostas stable_v1, reutilizáveis ENTRE conversas. Estado operacional, handoffs e writes não entram. Buscado com corte rígido (0.80).',
   short: 'Vale só DENTRO desta conversa. Buscado filtrado por session_id, com corte permissivo (0.78) — pega você reformulando a mesma pergunta.',
   long: 'Episódios do cliente entre sessões. Não é resposta pronta: entra como contexto no prompt quando as duas camadas acima dão MISS.',
   facts: 'Fatos estruturados do cliente. Fato novo que contradiz um antigo desativa o anterior (supersessão), preservando a trilha.',
