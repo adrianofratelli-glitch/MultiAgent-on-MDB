@@ -8,7 +8,7 @@ const NAV = ['Chat', 'Agentes', 'Guardrails', 'Métricas'];
 const OP_LABELS = { read: 'leitura', write: 'escrita', vectorSearch: '$vectorSearch', hybridSearch: 'BM25 + vetor (RRF)', changeStream: 'change stream' };
 const IDENTITIES = ['ana', 'bruno', 'carla', 'diego'];
 
-function ChatPanel({ messages, input, setInput, send, busy, customerName, demos }) {
+function ChatPanel({ messages, input, setInput, send, busy, customerName, demos, suggestions, onSuggestion }) {
   const [selectedScenario, setSelectedScenario] = useState(null);
   return (
     <section className="chat-panel">
@@ -31,6 +31,18 @@ function ChatPanel({ messages, input, setInput, send, busy, customerName, demos 
           </div>
         ))}
       </div>
+      {suggestions?.length > 0 && !busy && (
+        /* Próximos passos derivados de query: cada chip carrega a mensagem exata que
+           dispara, então clicar sempre resolve — nunca leva a um "não encontrei". */
+        <div className="suggestions" aria-label="Próximos passos sugeridos">
+          <span className="suggestions-label">posso seguir com</span>
+          {suggestions.map((item) => (
+            <button type="button" className="suggestion-chip" key={item.topic + item.label} onClick={() => onSuggestion(item.message)}>
+              {item.label}
+            </button>
+          ))}
+        </div>
+      )}
       <form className="chat-form" onSubmit={(event) => { event.preventDefault(); send(); }}>
         <textarea value={input} onChange={(event) => setInput(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); send(); } }} placeholder="Digite sua solicitação… (Enter envia, Shift+Enter quebra linha)" rows="3" />
         <button className="send-button" disabled={busy || !input.trim()}>{busy ? 'Coordenando…' : 'Enviar turno'}<span>↗</span></button>
@@ -67,7 +79,7 @@ function AgentsPage({ agents, adminMode, setAdminMode, reload }) {
   return (
     <section className="full-page-section">
       <div className="section-copy">
-        <span className="eyebrow">ai_brain.agent_registry</span><h2>O time de agentes é uma collection.</h2>
+        <span className="eyebrow">multiagent_brain.agent_registry</span><h2>O time de agentes é uma collection.</h2>
         <p>Modelo, persona, ferramentas e budget mudam por documento — sem deploy. {agents.length} agentes reais, todos respondem de fato — nenhum documento de enfeite.</p>
         <label className="admin-toggle">
           <input type="checkbox" checked={adminMode} onChange={(event) => setAdminMode(event.target.checked)} />
@@ -184,6 +196,7 @@ export default function App() {
   const [error, setError] = useState('');
   const [conversationId, setConversationId] = useState(null);
   const [lastRun, setLastRun] = useState(null);
+  const [suggestions, setSuggestions] = useState([]);
   const [adminMode, setAdminMode] = useState(false);
   const [liveEvents, setLiveEvents] = useState([]);
   const [liveOn, setLiveOn] = useState(false);
@@ -208,7 +221,7 @@ export default function App() {
         setTimeline(lastConv.last_timeline || []);
         setLastRun(lastConv.last_timeline ? { active_agent: lastConv.active_agent, usage: lastConv.last_usage || {} } : null);
       } else {
-        setConversationId(null); setMessages([]); setTimeline([]); setLastRun(null);
+        setConversationId(null); setMessages([]); setTimeline([]); setLastRun(null); setSuggestions([]);
       }
     } catch (err) { setError(err.message); }
   };
@@ -243,17 +256,18 @@ export default function App() {
   }, [customer?.customer_key]);
 
   const newConversation = () => {
-    setConversationId(null); setMessages([]); setTimeline([]); setLastRun(null); setHandoffs([]); setInput('');
+    setConversationId(null); setMessages([]); setTimeline([]); setLastRun(null); setHandoffs([]); setInput(''); setSuggestions([]);
     setGuardrails([]); setMetrics({}); setLiveEvents([]);
   };
 
-  const send = async () => {
-    if (!input.trim() || busy) return;
-    const value = input.trim(); setInput(''); setBusy(true); setError('');
+  const send = async (override) => {
+    const raw = typeof override === 'string' ? override : input;
+    if (!raw.trim() || busy) return;
+    const value = raw.trim(); setInput(''); setBusy(true); setError(''); setSuggestions([]);
     setMessages((items) => [...items, { role: 'user', text: value }]);
     try {
       const run = await api.chat(value, conversationId);
-      setConversationId(run.conversation_id); setTimeline(run.timeline); setLastRun(run);
+      setConversationId(run.conversation_id); setTimeline(run.timeline); setLastRun(run); setSuggestions(run.suggestions || []);
       const longTermUsed = (run.timeline || []).some((event) => event.collection === 'long_term_memory');
       setMessages((items) => [...items, { role: 'assistant', agent: run.active_agent, text: run.response, cacheHit: run.cache_hit, cacheSource: run.cache_source, tokens: run.usage?.total ?? 0, longTermUsed }]);
       const [hs, met, gr, mem] = await Promise.all([api.handoffs(run.conversation_id), api.metrics(), api.guardrails('events'), api.memory(customer.customer_key)]);
@@ -339,15 +353,15 @@ export default function App() {
             </div>
           )}
           <AiBrainHighlights customer={customer} lastRun={lastRun} timeline={timeline} />
-          <div className="workspace"><ChatPanel key={customer?.customer_key} {...{ messages, input, setInput, send, busy }} customerName={customer?.name} demos={demoScenarios} /><section className="timeline-panel"><div className="panel-label"><span>raio-x do turno</span><code>{timeline.length} eventos</code></div><Timeline events={timeline} /></section><Inspector tab={inspector} {...data} /></div>
+          <div className="workspace"><ChatPanel key={customer?.customer_key} {...{ messages, input, setInput, send, busy, suggestions }} customerName={customer?.name} demos={demoScenarios} onSuggestion={(message) => send(message)} /><section className="timeline-panel"><div className="panel-label"><span>raio-x do turno</span><code>{timeline.length} eventos</code></div><Timeline events={timeline} /></section><Inspector tab={inspector} {...data} /></div>
           <div className="inspector-tabs">{['agents', 'handoffs', 'memory', 'guardrails', 'metrics'].map((item) => <button className={inspector === item ? 'active' : ''} onClick={() => setInspector(item)} key={item}>{item}</button>)}</div>
-          <AiBrainInspector customerKey={customer?.customer_key} run={lastRun} />
+          <AiBrainInspector customerKey={customer?.customer_key} run={lastRun} conversationId={conversationId} />
         </>}
         {nav === 'Agentes' && <AgentsPage agents={agents} adminMode={adminMode} setAdminMode={setAdminMode} reload={loadCore} />}
         {nav === 'Guardrails' && <DataPage title="Segurança antes da inteligência." subtitle="Entrada é validada uma vez por turno, antes de qualquer modelo, memória ou trace.">{guardrails.length ? <pre>{JSON.stringify(guardrails, null, 2)}</pre> : <p className="inspector-empty">Nenhum evento ainda — só aparece aqui quando uma mensagem é de fato bloqueada. Tente o prompt de guardrail sugerido para a identidade Carla ou Diego.</p>}</DataPage>}
         {nav === 'Métricas' && <MetricsPage metrics={metrics} evalRuns={evalRuns} adminMode={adminMode} />}
       </main>
-      <footer><span>MongoDB Atlas</span><code>multi_agent_poc + ai_brain</code><span>{customer?.name || 'identidade demo'}</span></footer>
+      <footer><span>MongoDB Atlas</span><code>multi_agent_poc + multiagent_brain</code><span>{customer?.name || 'identidade demo'}</span></footer>
     </>
   );
 }

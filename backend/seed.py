@@ -35,6 +35,17 @@ KEYS = {
 
 async def seed(store: DataStore, *, create_indexes: bool = True) -> list[str]:
     messages: list[str] = []
+    # O seed redefine o mundo (status de pedido, fatura, saldo de pontos). Toda resposta
+    # em cache foi derivada do mundo ANTERIOR, então precisa morrer junto: sem isso o
+    # turno seguinte serve um HIT dizendo "seu pedido está em troca_solicitada" enquanto
+    # a collection já voltou para "processando" — a demo se contradiz na tela, e o pior é
+    # que ela se contradiz com confiança. Descoberto quebrando a PoV de propósito.
+    for cache_collection in ("semantic_cache", "short_term_memory"):
+        try:
+            removed = await store.delete_many(cache_collection, {})
+            messages.append(f"{cache_collection}: {removed} entradas invalidadas (dados de negócio foram redefinidos)")
+        except Exception as exc:  # noqa: BLE001 — cache vazio/ausente não impede o seed
+            messages.append(f"{cache_collection}: limpeza best-effort ({exc})")
     for collection, documents in seed_documents().items():
         key = KEYS[collection]
         for document in documents:
@@ -61,7 +72,7 @@ async def seed(store: DataStore, *, create_indexes: bool = True) -> list[str]:
     await store.replace_one(
         "model_config",
         {"key": "default"},
-        {"key": "default", "default_model": "claude-haiku-4-5", "global_turn_tokens": 20000},
+        {"key": "default", "default_model": "claude-haiku-4-5", "global_turn_tokens": 26000},
         brain=True,
         upsert=True,
     )

@@ -39,5 +39,5 @@ A configuração muda com mais frequência que o código e precisa ser inspecion
 - A colaboração pode ser consultada por `conversation_id` e agregada por agente.
 - Um `conversation_id` só é retomado pelo titular autenticado; IDs alheios ou desconhecidos geram uma nova conversa.
 - TTL cuida do ciclo de vida operacional sem jobs externos.
-- O fallback local de RRF funciona em versões anteriores; Atlas 8.0+ pode mover a fusão para `$rankFusion`.
 - Em escala maior, revisitaremos particionamento de traces, arquivamento e Change Streams para consumidores assíncronos. Uma fila só será adicionada quando existir trabalho assíncrono real, não para representar handoff síncrono.
+

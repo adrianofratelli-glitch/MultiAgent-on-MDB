@@ -246,7 +246,7 @@ footer { max-width: 1560px; margin: auto; padding: 24px; border-top: 1px solid v
 }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; transition-duration: .01ms !important; } }
 
-/* ai_brain: destaques de governança + inspetor de collections (cache/curto/longo/fatos) */
+/* Destaques de governança + inspetor de collections (cache/curto/longo/fatos) */
 .ai-brain-highlights { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin: 0 0 16px; }
 .feat-card { padding: 12px 14px; background: var(--bg-card); border: 1px solid var(--border-subtle); border-radius: 12px; }
 .feat-title { font: 600 11px 'JetBrains Mono'; margin-bottom: 6px; }
@@ -274,9 +274,64 @@ footer { max-width: 1560px; margin: auto; padding: 24px; border-top: 1px solid v
 .insp-a { font-size: 11.5px; color: var(--text-sec); margin-top: 2px; }
 .insp-meta { font-size: 10px; margin-top: 4px; }
 
+/* Legenda da aba: as duas primeiras collections guardam os MESMOS textos; o que
+   muda é como a cascata lê cada uma. Sem isto, o inspetor parece duplicado. */
+.insp-hint {
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--text-sec);
+  background: rgba(0, 237, 100, .06);
+  border-left: 2px solid var(--border-accent);
+  border-radius: 0 6px 6px 0;
+  padding: 8px 10px;
+  margin: 2px 0 10px;
+}
+/* Etiqueta por documento: escopo (cache) ou sessão (curto prazo). */
+.insp-scope {
+  display: inline-block;
+  font: 600 9.5px 'JetBrains Mono';
+  letter-spacing: .02em;
+  border-radius: 20px;
+  padding: 3px 8px;
+  margin-top: 5px;
+  border: 1px solid var(--border-subtle);
+  color: var(--text-muted);
+}
+.insp-scope.short { border-color: rgba(0, 237, 100, .32); color: #a9e9c6; }
+.insp-scope.cache { border-color: rgba(120, 180, 255, .32); color: #a8c8ea; }
+
 @media (max-width: 900px) {
   .ai-brain-highlights { grid-template-columns: 1fr 1fr; }
 }
 @media (max-width: 560px) {
   .ai-brain-highlights { grid-template-columns: 1fr; }
+}
+
+/* Próximos passos: chips derivados de query real, acima do campo de mensagem. */
+.suggestions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 16px 0;
+}
+.suggestions-label {
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-muted, #8aa0a8);
+}
+.suggestion-chip {
+  border: 1px solid rgba(0, 237, 100, 0.35);
+  background: rgba(0, 237, 100, 0.08);
+  color: #c9f7dd;
+  border-radius: 999px;
+  padding: 6px 12px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+.suggestion-chip:hover {
+  background: rgba(0, 237, 100, 0.18);
+  border-color: rgba(0, 237, 100, 0.6);
 }

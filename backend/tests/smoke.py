@@ -6,7 +6,7 @@ import sys
 import httpx
 
 
-BASE = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8000"
+BASE = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8031"
 
 # A checagem de handoff SÓ é válida num turno que rodou de verdade: num cache HIT a resposta
 # é replay e nenhum handoff novo é persistido. Como o próprio smoke deixa a mensagem no
@@ -83,4 +83,3 @@ if __name__ == "__main__":
     except Exception as exc:
         print(f"✗ smoke falhou: {exc}", file=sys.stderr)
         raise SystemExit(1)
-

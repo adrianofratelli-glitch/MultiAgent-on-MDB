@@ -68,6 +68,10 @@ python tests/smoke.py <url>     # black-box
 python eval.py <url>            # golden dataset, results to eval_runs
 ```
 
+## Production boundary
+
+Set `ENVIRONMENT=production`, `AUTH_REQUIRED=1` and `DEMO_TOKEN_ISSUANCE_ENABLED=0`. Startup then fails closed on weak/default JWT or admin secrets, wildcard CORS, disabled authentication or demo token issuance. `/metrics` is admin-only. The local launcher remains a PoV runtime; add TLS termination, an enterprise IdP and a managed process/container platform before external exposure.
+
 ## Docs
 
 [Architecture](docs/architecture.md) · [ADR-001](docs/adr/ADR-001-arquitetura-multi-agente.md)

@@ -10,7 +10,7 @@ from typing import Annotated
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from .budget import BudgetExceeded
 from .config import get_settings
@@ -34,8 +34,27 @@ def log(event: str, **fields) -> None:
     logger.info(json.dumps(payload, default=str) if settings.log_json else f"{event} {fields}")
 
 
+def validate_runtime_security(runtime_settings) -> None:
+    """Fail startup on configurations that would expose demo credentials."""
+    if runtime_settings.environment.lower() in {"development", "dev", "local"}:
+        return
+    if runtime_settings.jwt_secret == "desenvolvimento-inseguro-troque-este-segredo":
+        raise RuntimeError("JWT_SECRET inseguro recusado fora de development")
+    if runtime_settings.admin_api_key == "admin-demo":
+        raise RuntimeError("ADMIN_API_KEY insegura recusada fora de development")
+    if len(runtime_settings.jwt_secret) < 32 or len(runtime_settings.admin_api_key) < 24:
+        raise RuntimeError("segredos de produção devem ter pelo menos 32/24 caracteres")
+    if not runtime_settings.auth_required:
+        raise RuntimeError("AUTH_REQUIRED deve permanecer ligado fora de development")
+    if runtime_settings.demo_token_issuance_enabled:
+        raise RuntimeError("DEMO_TOKEN_ISSUANCE_ENABLED deve estar desligado fora de development")
+    if "*" in runtime_settings.cors_origin_list:
+        raise RuntimeError("CORS_ORIGINS='*' é recusado fora de development")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    validate_runtime_security(settings)
     store = DataStore(settings)
     await store.connect()
     set_store(store)
@@ -98,6 +117,8 @@ async def unhandled_error_handler(request: Request, exc: Exception):
 
 @app.post("/api/auth/token")
 async def create_token(payload: TokenRequest, store: DataStore = Depends(get_store)):
+    if not settings.demo_token_issuance_enabled:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "emissão de token demo desabilitada")
     customer = await store.find_one("customers", {"customer_key": payload.customer_key})
     if not customer:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "identidade demo não encontrada")
@@ -184,13 +205,24 @@ INSPECTOR_COLLECTIONS = {
 
 
 @app.get("/api/inspector/{view}")
-async def inspector(view: str, customer: dict = Depends(current_customer), store: DataStore = Depends(get_store)):
+async def inspector(
+    view: str,
+    conversation_id: str | None = None,
+    customer: dict = Depends(current_customer),
+    store: DataStore = Depends(get_store),
+):
     collection = INSPECTOR_COLLECTIONS.get(view)
     if not collection:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "visão de inspetor desconhecida")
     query = {"customer_key": customer["customer_key"]}
     if view == "facts":
         query["active"] = True
+    if view == "short":
+        # Memória de CURTO prazo é por sessão. Filtrar só por customer_key mostrava as
+        # conversas anteriores todas: abrir uma aba nova, sem ter perguntado nada, exibia
+        # 5 documentos — e o painel passava a contradizer o próprio conceito que ele existe
+        # para provar. Sem conversa ativa, o correto é vir vazio.
+        query["session_id"] = conversation_id or "__sem_conversa__"
     items = await store.find_many(collection, query, limit=30, sort=[("created_at", -1)])
     return {
         "view": view,
@@ -230,6 +262,11 @@ async def get_metrics(_: dict = Depends(current_customer)):
     return metrics.snapshot()
 
 
+@app.get("/metrics", include_in_schema=False, dependencies=[Depends(require_admin)])
+async def prometheus_metrics():
+    return Response(metrics.prometheus(), media_type="text/plain; version=0.0.4")
+
+
 @app.get("/api/health")
 async def health(store: DataStore = Depends(get_store)):
     try:
@@ -238,8 +275,14 @@ async def health(store: DataStore = Depends(get_store)):
             store.count("agent_registry", {"active": True}, brain=True), store.count("agent_handoffs"), store.count("agent_traces")
         )
         return {"status": "ok", "storage": "memory-demo" if store.memory else "mongodb-atlas", "mongodb": True, "anthropic_configured": bool(settings.anthropic_api_key), "counts": {"agents": agents_count, "handoffs": handoffs_count, "traces": traces_count}, "at": utcnow()}
-    except Exception as exc:
-        return JSONResponse(status_code=503, content={"status": "degraded", "mongodb": False, "detail": str(exc)})
+    except Exception:
+        logger.warning("healthcheck storage unavailable", exc_info=True)
+        return JSONResponse(status_code=503, content={"status": "degraded", "mongodb": False})
+
+
+@app.get("/health/live")
+async def liveness():
+    return {"status": "alive"}
 
 
 @app.patch("/api/admin/agents/{agent_key}", dependencies=[Depends(require_admin)])

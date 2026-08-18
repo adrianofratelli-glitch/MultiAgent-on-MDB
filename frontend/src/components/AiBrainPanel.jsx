@@ -62,10 +62,30 @@ const INSP_TABS = [
   { key: 'facts', label: 'customer_memory' },
 ];
 
-// Inspetor "ai_brain": lê as mesmas 4 collections que a cascata consulta antes
+// Cada turno grava em short_term_memory E em semantic_cache, então as duas abas
+// mostram os mesmos textos — o que muda é COMO a cascata lê cada uma. Sem esta
+// legenda, quem abre o inspetor conclui que uma das duas está duplicada à toa.
+const INSP_HINTS = {
+  cache: 'Vale ENTRE conversas. Buscado sem filtro de sessão, com corte rígido (0.80) — pega a mesma pergunta numa conversa nova. Texto idêntico dá HIT sempre, por match exato.',
+  short: 'Vale só DENTRO desta conversa. Buscado filtrado por session_id, com corte permissivo (0.78) — pega você reformulando a mesma pergunta.',
+  long: 'Episódios do cliente entre sessões. Não é resposta pronta: entra como contexto no prompt quando as duas camadas acima dão MISS.',
+  facts: 'Fatos estruturados do cliente. Fato novo que contradiz um antigo desativa o anterior (supersessão), preservando a trilha.',
+};
+
+const SCOPE_LABEL = {
+  customer: 'vale entre conversas suas',
+  global: 'público da sua área',
+  faq: 'FAQ pré-carregada no seed',
+};
+
+// Inspetor de memória: lê as mesmas 4 collections que a cascata consulta antes
 // do LLM, sempre filtrado pelo customer_key da identidade logada — a prova
 // visual de que governança/isolamento não é promessa, é o dado.
-export default function AiBrainInspector({ customerKey, run }) {
+export default function AiBrainInspector({ customerKey, run, conversationId }) {
+  // O id vem do estado da conversa ATIVA, não só do último run: ao retomar uma conversa
+  // (GET /api/conversations/latest) o `run` reconstruído não carrega conversation_id, e a
+  // aba de curto prazo aparecia vazia mesmo com turnos gravados naquela sessão.
+  const currentConversation = conversationId || run?.conversation_id;
   const [tab, setTab] = useState('cache');
   const [payload, setPayload] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -76,7 +96,7 @@ export default function AiBrainInspector({ customerKey, run }) {
     setLoading(true);
     setErr(null);
     try {
-      setPayload(await api.inspector(tab));
+      setPayload(await api.inspector(tab, currentConversation));
     } catch (e) {
       setErr(e.message);
     } finally {
@@ -85,14 +105,14 @@ export default function AiBrainInspector({ customerKey, run }) {
   };
 
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  useEffect(() => { load(); }, [tab, run, customerKey]);
+  useEffect(() => { load(); }, [tab, run, customerKey, currentConversation]);
 
   const items = payload?.items ?? [];
 
   return (
     <div className="ai-brain-inspector">
       <div className="ai-brain-inspector-head">
-        <span className="collections-panel-label">ai_brain · collections consultadas antes do LLM</span>
+        <span className="collections-panel-label">multi_agent_poc · collections consultadas antes do LLM</span>
         <div className="inspector-tabs-row">
           {INSP_TABS.map((t) => (
             <button key={t.key} className={`insp-tab ${tab === t.key ? 'active' : ''}`} onClick={() => setTab(t.key)}>{t.label}</button>
@@ -104,17 +124,34 @@ export default function AiBrainInspector({ customerKey, run }) {
       {loading && <div className="dim" style={{ padding: 8 }}>carregando…</div>}
       {!loading && !err && (
         <div className="insp-body">
+          <div className="insp-hint">{INSP_HINTS[tab]}</div>
           <div className="dim mono insp-head">customer_key: {payload?.customer_key ?? customerKey} · {items.length} documento(s) mais recentes</div>
-          {items.length === 0 && <div className="dim">Nada nesta collection ainda para esta identidade — pergunte algo e depois volte aqui.</div>}
+          {items.length === 0 && (
+            <div className="dim">
+              {tab === 'short'
+                ? (currentConversation
+                    ? 'Nada gravado nesta conversa ainda — faça uma pergunta e volte aqui.'
+                    : 'Conversa nova: a memória de curto prazo nasce vazia e é preenchida a cada turno.')
+                : 'Nada nesta collection ainda para esta identidade — pergunte algo e depois volte aqui.'}
+            </div>
+          )}
           {items.map((item, index) => (
             <div key={item._id || index} className="insp-row">
               {(item.question_text || item.question) && <div className="insp-q mono">Q: {short(item.question_text || item.question, 160)}</div>}
               {item.answer && <div className="insp-a">A: {short(item.answer, 160)}</div>}
               {item.fact_type && <div className="insp-q">🔖 {item.value} <span className="dim">({item.fact_type})</span></div>}
               {!item.question_text && !item.question && !item.fact_type && item.text && <div className="insp-q">{short(item.text, 160)}</div>}
+              {item.session_id && (
+                <div className="insp-scope short">
+                  sessão {short(item.session_id, 22)}
+                  {item.session_id === currentConversation ? ' · esta conversa' : ' · conversa anterior'}
+                </div>
+              )}
+              {item.scope && (
+                <div className="insp-scope cache">scope: {item.scope} · {SCOPE_LABEL[item.scope] ?? 'entrada de runtime'}</div>
+              )}
               <div className="insp-meta mono dim">
                 {item.agent ? `agente: ${item.agent} · ` : ''}
-                {item.scope ? `scope: ${item.scope} · ` : ''}
                 {item.expires_at ? `expira ${short(item.expires_at, 19)} (TTL)` : ''}
                 {item.active === false ? 'substituído (supersessão) · trilha de auditoria' : ''}
               </div>

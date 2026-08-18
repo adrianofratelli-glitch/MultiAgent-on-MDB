@@ -1,7 +1,7 @@
 import asyncio
 import copy
 import re
-from collections import defaultdict
+from collections import defaultdict, deque
 from datetime import datetime, timezone
 from typing import Any
 
@@ -210,6 +210,8 @@ class DataStore:
             except Exception:
                 pass
         seen: set[str] = set()
+        seen_order: deque[str] = deque()
+        seen_limit = 1000
         while True:
             await asyncio.sleep(1.2)
             items = await self.find_many("agent_handoffs", {}, limit=200, sort=[("at", 1)])
@@ -218,6 +220,9 @@ class DataStore:
                 if marker in seen:
                     continue
                 seen.add(marker)
+                seen_order.append(marker)
+                if len(seen_order) > seen_limit:
+                    seen.discard(seen_order.popleft())
                 owner = await self.find_one("agent_conversations", {"conversation_id": item.get("conversation_id"), "customer_key": customer_key})
                 if owner:
                     yield {key: value for key, value in item.items() if key != "_id"}

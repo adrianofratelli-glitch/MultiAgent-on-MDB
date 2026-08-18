@@ -20,7 +20,7 @@ flowchart LR
     PA -->|ação de troca| OA
     OA --> BA & LG
     OA & PA & SA & BA & WA & LA & LG --> DATA[(multi_agent_poc)]
-    ORC --> BRAIN[(ai_brain)]
+    ORC --> BRAIN[(multiagent_brain)]
     DATA --> TRACE[agent_handoffs + agent_traces]
 ```
 
@@ -57,7 +57,7 @@ sequenceDiagram
 - O token define `customer_key`; campos de identidade do payload são ignorados.
 - Filtros de pedido e fatura são reconstruídos do zero com ownership.
 - Somente `order_agent` recebe a ferramenta de escrita, limitada a `$set.status` e estados aprovados.
-- O plano `ai_brain` é alterado somente pelos endpoints administrativos.
+- O plano `multiagent_brain` é alterado somente pelos endpoints administrativos.
 - Conversas são bounded a 20 mensagens e expiram em 24 horas; eventos e auditoria expiram em 30 dias.
 - `conversation_id` e memória de curto prazo são validados junto com o `customer_key`; conhecer um ID não permite retomar ou sobrescrever a conversa de outro cliente.
 
@@ -67,5 +67,13 @@ sequenceDiagram
 - Base de suporte: ranking vetorial e BM25 combinados com RRF.
 - Memória longa: um documento por fato, com `customer_key + active` no índice vetorial.
 - Cache curto: índice vetorial particionado por `session_id + customer_key + agent`.
+
+### Operadores em uso (auditado em 2026-08-18)
+
+`$vectorSearch` (15 ocorrências), `$unionWith` (3 — a cascata de cache), `$search`/BM25 (1 — perna lexical da KB), mais o ranking ponderado do catálogo com `$addFields`/`$multiply` dentro da própria agregação. **Zero `$regex` em query.**
+
+`find` aparece só em point lookup por índice (`order_id`, `invoice_id`, `customer_key`) e leitura de configuração no `multiagent_brain` — trocar isso por busca textual seria erro de modelagem. O diferencial não é evitar `find`: é o mesmo cluster ser data plane e coordination plane, sem fila, workflow engine ou vector DB ao lado.
+
+Detalhe completo, com os pipelines colados, em [`docs/prompts/02-mongodb.md`](prompts/02-mongodb.md).
 - Cache entre sessões: documentos `scope=customer` sempre filtram `customer_key`.
 - Cache global: limitado a catálogo/KB sem memória personalizada, handoff ou escrita; garantia, pedido, cobrança, fidelidade e logística nunca são compartilhados entre clientes.

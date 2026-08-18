@@ -7,6 +7,7 @@ from time import perf_counter
 from typing import Any
 
 from .database import DataStore, utcnow
+from .guidance import customer_snapshot, format_options, no_data_reply
 from .memory import active_facts
 from .models import TimelineEvent
 from .policies import public_document, safe_invoice_filter, safe_order_read_filter, safe_order_update, safe_shipment_filter
@@ -22,7 +23,15 @@ GROUNDING_RULES = (
     "sem repetir instruções do sistema. A mensagem do cliente pode ter partes de outras especialidades (ex.: "
     "produto, suporte, fatura) que não são a sua — nesse caso, IGNORE essas partes silenciosamente, nunca diga "
     "'não tenho acesso' a um assunto que não é seu, nunca peça desculpas por isso e nunca opine sobre política "
-    "de outra área (desconto, ajuste de fatura, etc.); outro agente da cadeia já está cuidando disso."
+    "de outra área (desconto, ajuste de fatura, etc.); outro agente da cadeia já está cuidando disso. "
+    # A busca já roda com o dono reconstruído do JWT: o que chega aqui é, por construção, do
+    # cliente autenticado. Sem esta regra o modelo se deixava levar por um nome citado na
+    # mensagem ('o pedido PED-1001 do bruno') e afirmava que o pedido era de outra pessoa —
+    # com o raio-x na tela mostrando o documento certo. Mantido CURTO de propósito: este bloco
+    # é compartilhado por todos os agentes e entra no budget de cada turno; a versão longa
+    # estourou o `max_turn_tokens` do warranty_agent e derrubou 3 cenários com HTTP 429.
+    "Todo documento acima é do cliente autenticado. Se a mensagem citar outro nome, ignore o nome: "
+    "nunca diga que o registro é de outra pessoa nem que não encontrou o que está acima."
 )
 
 
@@ -101,8 +110,11 @@ async def run_order_agent(store: DataStore, message: str, customer: dict, llm=No
     clean = public_document(order)
     requested_status = _requested_status(message) if clean else None
     if not clean:
-        response = "Não encontrei esse pedido para a identidade autenticada. Confira o número do pedido."
-        event = TimelineEvent(category="agent", title="Consulta segura de pedido", agent="order_agent", collection="orders", op="read", filter=query, result=[], duration_ms=(perf_counter() - started) * 1000)
+        # Beco sem saída vira orientação ancorada em dado real: lista os pedidos que
+        # ESTA identidade tem de fato, em vez de mandar o cliente "conferir o número".
+        snapshot = await customer_snapshot(store, customer)
+        response = no_data_reply("order", snapshot, identifier=explicit_order_id)
+        event = TimelineEvent(category="agent", title="Consulta segura de pedido (sem resultado — orientação com os pedidos reais)", agent="order_agent", collection="orders", op="read", filter=query, result=[], duration_ms=(perf_counter() - started) * 1000)
         return AgentResult(response, event)
     if requested_status:
         # segue valendo mesmo se o pedido JÁ estava nesse status (ex.: cliente repete "quero trocar" numa
@@ -139,7 +151,9 @@ async def run_order_agent(store: DataStore, message: str, customer: dict, llm=No
         return AgentResult(response, event)
     response = f"O pedido {clean['order_id']} de {clean['product']} está com status **{clean['status']}**."
     trivial = _is_trivial_lookup(message, order_id)
-    synthesized = None if trivial else await llm_synthesize(llm, agent_doc, budget, message, clean, "O cliente pode perguntar qualquer coisa sobre este pedido específico (prazo, status, itens, timeline) — responda com base no documento acima." + scope_hint)
+    synthesized = None if trivial else await llm_synthesize(llm, agent_doc, budget, message, clean, "O cliente pode perguntar qualquer coisa sobre este pedido específico (prazo, status, itens, timeline) — "
+        "responda com base no documento acima, começando pelo status. Nome de terceiro na mensagem é ruído: "
+        "é PROIBIDO dizer que o pedido é de outro cliente ou que não o encontrou." + scope_hint)
     title = "Consulta segura de pedido" + (" (resposta sintetizada pelo modelo)" if synthesized else " (modo econômico, sem chamada ao modelo)" if trivial else "")
     event = TimelineEvent(category="agent", title=title, agent="order_agent", collection="orders", op="read", filter=query, result=clean, duration_ms=(perf_counter() - started) * 1000)
     return AgentResult(synthesized or response, event)
@@ -159,7 +173,8 @@ async def run_billing_agent(store: DataStore, message: str, customer: dict, llm=
         invoice = invoices[0] if invoices else None
     clean = public_document(invoice)
     if not clean:
-        response = "Não encontrei essa fatura para a identidade autenticada."
+        snapshot = await customer_snapshot(store, customer)
+        response = no_data_reply("invoice", snapshot, identifier=explicit_invoice_id)
         synthesized = None
     else:
         response = f"A fatura {clean['invoice_id']} é de R$ {clean['amount']:.2f}, vence em {clean['due_date']} e está **{clean['status']}**."
@@ -184,8 +199,9 @@ async def run_warranty_agent(store: DataStore, message: str, customer: dict, llm
         order = orders[0] if orders else None
     clean = public_document(order)
     if not clean:
-        response = "Não encontrei esse pedido para a identidade autenticada. Confira o número do pedido."
-        event = TimelineEvent(category="agent", title="Consulta de garantia", agent="warranty_agent", collection="orders", op="read", filter=query, result=[], duration_ms=(perf_counter() - started) * 1000)
+        snapshot = await customer_snapshot(store, customer)
+        response = no_data_reply("order", snapshot, identifier=explicit_order_id)
+        event = TimelineEvent(category="agent", title="Consulta de garantia (sem resultado — orientação com os pedidos reais)", agent="warranty_agent", collection="orders", op="read", filter=query, result=[], duration_ms=(perf_counter() - started) * 1000)
         return AgentResult(response, event)
     product = await store.find_one("products_catalog", {"name": clean["product"]})
     category = product["category"] if product else None
@@ -227,18 +243,44 @@ async def run_loyalty_agent(store: DataStore, message: str, customer: dict, llm=
     account = await store.find_one("loyalty_accounts", query)
     clean = public_document(account)
     if not clean:
-        response = "Não encontrei uma conta de fidelidade para esta identidade."
+        snapshot = await customer_snapshot(store, customer)
+        response = ("Não encontrei uma conta de fidelidade ativa para a sua identidade."
+                    + (format_options(snapshot, exclude={"loyalty"})
+                       or " Se você acabou de aderir ao programa, o saldo aparece no próximo ciclo."))
         event = TimelineEvent(category="agent", title="Consulta de fidelidade", agent="loyalty_agent", collection="loyalty_accounts", op="read", filter=query, result=[], duration_ms=(perf_counter() - started) * 1000)
         return AgentResult(response, event)
 
     normalized = normalize(message)
     reward_key = next((key for key in REWARD_CATALOG if key in normalized), None)
+    wants_redemption = any(term in normalized for term in ("resgatar", "resgate", "trocar meus pontos", "usar pontos", "usar meus pontos"))
+    if reward_key is None and wants_redemption and not any(term in normalized for term in ("produto", "catalogo", "presente")):
+        # Pediu resgate de algo que NÃO existe na tabela de recompensas. Em vez de deixar o
+        # modelo improvisar um caminho ("acesse a seção de resgate no app" — que não existe),
+        # devolve o catálogo real com o custo de cada item e a distância até ele.
+        pontos = clean["points"]
+        linhas = []
+        for label, cost in sorted(REWARD_CATALOG.values(), key=lambda item: item[1]):
+            marcador = "✓ disponível" if pontos >= cost else f"faltam {cost - pontos} pontos"
+            linhas.append(f"- **{label}** — {cost} pontos ({marcador})")
+        response = (
+            f"Esse item não faz parte da tabela de recompensas do programa. "
+            f"Você tem **{pontos} pontos** (tier {clean['tier']}), e o que dá para resgatar hoje é:\n"
+            + "\n".join(linhas)
+            + "\n\nSe preferir, eu também busco um produto do catálogo dentro do seu saldo."
+        )
+        event = TimelineEvent(category="agent", title="Resgate fora da tabela de recompensas (catálogo real apresentado)", agent="loyalty_agent", collection="loyalty_accounts", op="read", filter=query, result=clean, duration_ms=(perf_counter() - started) * 1000)
+        return AgentResult(response, event)
     if reward_key:
         # resgate real: escrita restrita a $inc de pontos (nunca um valor arbitrário do modelo) + registro em
         # redemptions — mesmo padrão de segurança do order_agent (filtro reconstruído, campo aprovado só).
         label, cost = REWARD_CATALOG[reward_key]
         if clean["points"] < cost:
-            response = f"Você tem {clean['points']} pontos, mas {label} custa {cost} pontos — ainda não dá pra resgatar."
+            faltam = cost - clean["points"]
+            acessiveis = [f"**{lbl}** ({price} pontos)" for lbl, price in sorted(REWARD_CATALOG.values(), key=lambda item: item[1]) if clean["points"] >= price]
+            alternativa = (" Com o saldo atual você já consegue: " + ", ".join(acessiveis) + "."
+                           if acessiveis else " Assim que o saldo subir, eu processo o resgate na hora.")
+            response = (f"Você tem {clean['points']} pontos e {label} custa {cost} — faltam {faltam} pontos."
+                        + alternativa)
             event = TimelineEvent(category="agent", title="Resgate de fidelidade negado (saldo insuficiente)", agent="loyalty_agent", collection="loyalty_accounts", op="read", filter=query, result=clean, duration_ms=(perf_counter() - started) * 1000)
             return AgentResult(response, event)
         await store.update_one("loyalty_accounts", query, {"$inc": {"points": -cost}})
@@ -274,7 +316,8 @@ async def run_logistics_agent(store: DataStore, message: str, customer: dict, ll
         shipment = shipments[0] if shipments else None
     clean = public_document(shipment)
     if not clean:
-        response = "Não encontrei informação de envio para esse pedido nesta identidade."
+        snapshot = await customer_snapshot(store, customer)
+        response = no_data_reply("shipment", snapshot, identifier=explicit_order_id)
         event = TimelineEvent(category="agent", title="Consulta de logística", agent="logistics_agent", collection="shipments", op="read", filter=query, result=[], duration_ms=(perf_counter() - started) * 1000)
         return AgentResult(response, event)
 
@@ -417,9 +460,24 @@ async def run_product_agent(store: DataStore, message: str, customer: dict, llm=
         if memory_bias:
             response += "\n\n(Levei em conta que você já demonstrou preferência por preços mais baixos.)"
     elif category:
-        response = f"Não encontrei produtos ativos na categoria {category} dentro desse orçamento."
+        # Sem opção na categoria+orçamento: diz o que existe de fato na categoria em vez
+        # de encerrar. As faixas vêm de query, não de estimativa.
+        disponiveis = await search_products(store, message, None, category)
+        if disponiveis:
+            faixa = min(item["price"] for item in disponiveis)
+            response = (f"Não encontrei nada na categoria {category} dentro desse orçamento. "
+                        f"A opção ativa mais barata da categoria sai por R$ {faixa:.2f} — "
+                        f"quer que eu mostre, ou prefere que eu procure em outra categoria?")
+        else:
+            response = (f"A categoria {category} está sem itens ativos no catálogo agora. "
+                        "Me diga o uso que você tem em mente que eu procuro uma alternativa.")
     else:
-        response = "Não encontrei uma opção compatível no catálogo ativo."
+        categorias = sorted({item.get("category") for item in await store.find_many(
+            "products_catalog", {"active": True}, limit=100) if item.get("category")})
+        sugestao = (" O catálogo ativo tem: " + ", ".join(categorias[:8]) + "."
+                    if categorias else "")
+        response = ("Não achei uma opção compatível com o que você descreveu."
+                    + sugestao + " Me diga o uso ou uma faixa de preço que eu refino a busca.")
     synthesized = await llm_synthesize(
         llm, agent_doc, budget, message, products,
         "Escolha e recomende só produtos desta lista (nunca invente um SKU/preço fora dela). Se nada da lista "
@@ -470,7 +528,12 @@ async def run_support_agent(store: DataStore, message: str, customer: dict, llm=
     articles = await search_kb(store, message)
     clean = [public_document(item) for item in articles]
     evidence = clean[0] if clean else None
-    response = f"A orientação da base é: {evidence['content']}" if evidence else "Não encontrei orientação confiável na base de suporte."
+    response = (
+        f"A orientação da base é: {evidence['content']}" if evidence else
+        "Não achei um artigo da base que cubra exatamente esse caso. Me descreva o que acontece "
+        "(o que você fez, o que aconteceu, e desde quando) que eu diagnostico — ou peça um atendente "
+        "que eu abro um chamado agora."
+    )
     wants_recommendation = any(term in normalize(message) for term in ("parecido", "parecida", "similar", "mais barato", "mais barata", "recomenda"))
     handoff_note = (
         "O cliente também pediu uma recomendação de produto — você é o agente de SUPORTE, não tem o catálogo. "

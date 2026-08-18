@@ -46,6 +46,13 @@ class TimelineEvent(BaseModel):
     duration_ms: float = 0
 
 
+class Suggestion(BaseModel):
+    """Próximo passo clicável, sempre derivado de um documento que existe."""
+    topic: str
+    label: str
+    message: str
+
+
 class ChatResponse(BaseModel):
     conversation_id: str
     response: str
@@ -56,4 +63,5 @@ class ChatResponse(BaseModel):
     tokens_economizados: int = 0
     timeline: list[TimelineEvent]
     usage: dict[str, int]
+    suggestions: list[Suggestion] = []
 

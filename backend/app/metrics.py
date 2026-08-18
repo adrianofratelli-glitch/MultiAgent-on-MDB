@@ -43,6 +43,17 @@ class Metrics:
             }
         return {"counters": dict(self.counters), "routes": latencies}
 
+    def prometheus(self) -> str:
+        lines: list[str] = []
+        for name, value in sorted(self.counters.items()):
+            label = name.replace("\\", "\\\\").replace('"', '\\"')
+            lines.append(f'pov_business_counter{{name="{label}"}} {value}')
+        for route, values in sorted(self.route_latency_ms.items()):
+            label = route.replace("\\", "\\\\").replace('"', '\\"')
+            lines.append(f'pov_http_requests_total{{route="{label}"}} {len(values)}')
+            lines.append(f'pov_http_latency_ms_sum{{route="{label}"}} {sum(values):.3f}')
+            lines.append(f'pov_http_latency_ms_max{{route="{label}"}} {max(values, default=0):.3f}')
+        return "\n".join(lines) + "\n"
+
 
 metrics = Metrics()
-

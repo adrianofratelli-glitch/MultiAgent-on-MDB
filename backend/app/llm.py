@@ -14,6 +14,8 @@ class LLMGateway:
             api_key="dummy",  # Grove/Azure APIM auth vai no header api-key, não x-api-key
             base_url=settings.anthropic_base_url or None,
             default_headers={"api-key": settings.anthropic_api_key},
+            timeout=min(float(settings.turn_deadline_seconds), 60.0),
+            max_retries=0,  # retries/fallback are explicit below and share the turn budget
         ) if settings.anthropic_api_key else None
 
     async def complete(

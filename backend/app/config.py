@@ -15,12 +15,17 @@ class Settings(BaseSettings):
 
     mongodb_uri: str = ""
     mongodb_db: str = "multi_agent_poc"
-    mongodb_brain_db: str = "ai_brain"
+    # Cérebro em database PRÓPRIO, não em "ai_brain": este cluster é compartilhado com a
+    # PoV singleagent, que também tem um `ai_brain` com `guardrail_policies` e `model_config`
+    # de schema DIFERENTE. Com o nome genérico, o seed de uma PoV sobrescrevia a outra e o
+    # /api/chat quebrava com KeyError no meio de uma demo. Descoberto exatamente assim.
+    mongodb_brain_db: str = "multiagent_brain"
     anthropic_api_key: str = ""
     anthropic_base_url: str = ""
     jwt_secret: str = "desenvolvimento-inseguro-troque-este-segredo"
     jwt_ttl_minutes: int = 60
     auth_required: bool = True
+    demo_token_issuance_enabled: bool = True
     admin_api_key: str = "admin-demo"
     global_turn_token_budget: int = 20000
     turn_deadline_seconds: int = 120
@@ -37,8 +42,15 @@ class Settings(BaseSettings):
     # Calibrado contra o índice real (voyage-4, quantização escalar): texto idêntico só chega a ~0.84 de
     # score, não 1.0 — um threshold de 0.85+ nunca bateria nem no caso trivial. Não-relacionado mede ~0.64,
     # então a folga real é ~0.20, não os 0.15/0.07 que os números "de catálogo" 0.85/0.93 sugeriam.
-    short_term_cache_threshold: float = 0.80
-    global_cache_threshold: float = 0.83
+    # Banda medida neste índice (voyage-4 autoEmbed + quantização escalar), 18/08/2026:
+    #   texto idêntico ......... 0.8101 – 0.9213  (frase curta fica na faixa baixa)
+    #   pergunta não-relacionada 0.6453 – 0.7545
+    # O corte antigo do cache (0.83) ficava ACIMA do menor idêntico, então repetir uma
+    # pergunta curta numa conversa nova dava MISS — justamente o beat de cache da demo.
+    # Estes valores ficam no meio da folga real; o match exato por question_norm cobre
+    # o resto. Recalibrar com backend/calibrate_thresholds.py se o índice mudar.
+    short_term_cache_threshold: float = 0.78
+    global_cache_threshold: float = 0.80
     long_term_memory_limit: int = 5
     langfuse_public_key: str = ""
     langfuse_secret_key: str = ""

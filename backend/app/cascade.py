@@ -68,7 +68,20 @@ async def cascade_lookup(store: DataStore, *, target: str, area: str, customer_k
             message=message,
         )
     if not results:
-        return CascadeResult(hit=False)
+        # MISS vetorial não é a palavra final: texto LITERALMENTE idêntico tem que dar HIT
+        # sempre. Medido neste índice, repetir a mesma pergunta pontua entre 0.8101 e
+        # 0.9213 — frase curta fica na faixa baixa, então um corte fixo derruba a repetição
+        # exata de perguntas curtas ("qual é o valor da fatura FAT-1001?" = 0.8101). O match
+        # exato por question_norm é determinístico e fecha esse buraco sem afrouxar o corte
+        # semântico, que continua protegendo contra pergunta parecida-mas-diferente.
+        return await _cascade_lookup_fallback(
+            store,
+            target=target,
+            area=area,
+            customer_key=customer_key,
+            session_id=session_id,
+            message=message,
+        )
     best = results[0]
     tokens = estimate_tokens(best.get("answer", ""))
     return CascadeResult(
@@ -127,6 +140,31 @@ async def cascade_store_episode(store: DataStore, *, customer_key: str, message:
     await store.insert_one(
         "long_term_memory",
         {"customer_key": customer_key, "text": f"Pergunta: {message}\nResposta: {answer}", "created_at": utcnow()},
+    )
+
+
+async def cascade_store_short_term(
+    store: DataStore, *, target: str, area: str, customer_key: str, session_id: str,
+    message: str, answer: str, timeline: list[dict], active_agent: str,
+) -> None:
+    """Registra o turno APENAS na memória de curto prazo.
+
+    Existe para o caminho de cache HIT: a resposta já veio pronta, então não faz sentido
+    regravá-la no cache — mas a memória de CURTO prazo é o registro da conversa, não do
+    custo. Sem isto, um turno servido do cache não aparecia em short_term_memory: o painel
+    ficava vazio depois de várias perguntas, e uma reformulação seguinte não achava nada
+    na sessão (caía no corte mais rígido do cache e podia gastar LLM à toa).
+    """
+    now = utcnow()
+    question_norm = normalize(message)
+    await store.replace_one(
+        "short_term_memory",
+        {"session_id": session_id, "customer_key": customer_key, "agent": target, "question_norm": question_norm},
+        {"session_id": session_id, "agent": target, "area": area, "customer_key": customer_key,
+         "question_text": message, "question_norm": question_norm, "answer": answer,
+         "active_agent": active_agent, "timeline": timeline, "created_at": now,
+         "expires_at": now + timedelta(hours=24)},
+        upsert=True,
     )
 
 
