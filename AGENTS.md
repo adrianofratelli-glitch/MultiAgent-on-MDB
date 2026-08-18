@@ -1,16 +1,16 @@
 # AGENTS.md
 
-This file provides guidance to Codex (Codex.ai/code) when working with code in this repository.
+Este arquivo orienta o Codex (Codex.ai/code) ao trabalhar com o código deste repositório.
 
-## Project
+## Projeto
 
-Enterprise PoV of a multi-agent customer service system where MongoDB Atlas is both the data plane and the coordination plane. Routing rules, agent state, handoffs, memory, cache, guardrail decisions, and eval history all live in MongoDB documents and are queryable like any other operational data. See `docs/architecture.md` and `docs/adr/ADR-001-arquitetura-multi-agente.md` for the full rationale (why MongoDB over a queue/workflow engine).
+PoV enterprise de um sistema multi-agente de atendimento ao cliente em que o MongoDB Atlas é ao mesmo tempo o plano de dados e o plano de coordenação. Regras de roteamento, estado dos agentes, handoffs, memória, cache, decisões de guardrail e histórico de eval vivem todos como documentos no MongoDB e são consultáveis como qualquer outro dado operacional. Veja `docs/architecture.md` e `docs/adr/ADR-001-arquitetura-multi-agente.md` para o racional completo (por que MongoDB em vez de uma fila/motor de workflow).
 
-8 real agents in `agent_registry`: `orchestrator`, `order_agent`, `product_agent`, `support_agent`, `billing_agent`, `warranty_agent`, `loyalty_agent`, `logistics_agent`. If the registry says N agents, N of them respond — a prior iteration padded it with ~120 inert "dormant" documents to claim "100+ agents"; that was deliberately reverted. Don't reintroduce no-op documents just to inflate a count.
+8 agentes reais no `agent_registry`: `orchestrator`, `order_agent`, `product_agent`, `support_agent`, `billing_agent`, `warranty_agent`, `loyalty_agent`, `logistics_agent`. Se o registry diz N agentes, N deles respondem — uma iteração anterior o encheu com ~120 documentos inertes "adormecidos" para alegar "100+ agentes"; isso foi revertido de propósito. Não reintroduza documentos inúteis só para inflar uma contagem.
 
-Docs and UI copy are in Portuguese; code/comments are in English.
+A documentação e os textos da UI estão em português; código e comentários seguem em inglês.
 
-## Commands
+## Comandos
 
 Setup:
 ```bash
@@ -21,71 +21,71 @@ pip install -r backend/requirements.txt
 python backend/seed.py
 ```
 
-Run backend (port 8031, strict — exits if taken, no auto-fallback):
+Rodar o backend (porta 8031, estrito — sai se estiver ocupada, sem fallback automático):
 ```bash
 cd backend && python run.py
 ```
 
-Run backend without Atlas (in-memory store, same seed data/contracts, no real Search/Vector Search/Change Streams):
+Rodar o backend sem Atlas (store em memória, mesmos dados de seed/contratos, sem Search/Vector Search/Change Streams reais):
 ```bash
 cd backend && DEMO_MODE=1 AUTH_REQUIRED=1 python run.py
 ```
 
-Run frontend (port 5191, strict):
+Rodar o frontend (porta 5191, estrito):
 ```bash
 cd frontend && npm install && npm run dev
 ```
 
-Backend tests:
+Testes do backend:
 ```bash
-cd backend && pytest -q                                  # unit tests, full suite
-cd backend && pytest tests/test_router.py -q              # single file
-cd backend && pytest tests/test_router.py::test_name -q   # single test
-python backend/tests/smoke.py http://127.0.0.1:8031        # black-box smoke test against a running server; nonzero exit on failure
-python backend/eval.py http://127.0.0.1:8031               # golden-dataset eval (seed_data.py:EVAL_CASES), writes pass/fail history to eval_runs
+cd backend && pytest -q                                  # testes unitários, suíte completa
+cd backend && pytest tests/test_router.py -q              # um arquivo
+cd backend && pytest tests/test_router.py::test_name -q   # um teste
+python backend/tests/smoke.py http://127.0.0.1:8031        # smoke test caixa-preta contra um servidor rodando; sai com código não-zero em falha
+python backend/eval.py http://127.0.0.1:8031               # eval de golden dataset (seed_data.py:EVAL_CASES), grava histórico de pass/fail em eval_runs
 ```
 
-Before a live demo, pre-warm the semantic cache so the customer's first click isn't a cold multi-hop LLM chain:
+Antes de uma demo ao vivo, pré-aqueça o cache semântico para que o primeiro clique do cliente não seja uma cadeia multi-hop fria de LLM:
 ```bash
 python backend/warmup.py http://127.0.0.1:8031
 ```
-This calls every non-guardrail demo prompt (mirrors `frontend/src/App.jsx:DEMOS_BY_IDENTITY` verbatim — cache key is the normalized message) once per identity, for real, against Anthropic. It's honest pre-warming, not fabricated usage: the first real turn already happened during warmup, so the live click is a genuine `cache_hit: true` replaying the full stored timeline. `semantic_cache` TTL is 60 minutes to survive the walk from warmup to the meeting.
+Isso chama de verdade, contra a Anthropic, cada prompt de demo que não seja de guardrail (espelhando `frontend/src/App.jsx:DEMOS_BY_IDENTITY` literalmente — a chave de cache é a mensagem normalizada), uma vez por identidade. É pré-aquecimento honesto, não uso fabricado: o primeiro turno real já aconteceu durante o warmup, então o clique ao vivo é um `cache_hit: true` genuíno reproduzindo a timeline armazenada por inteiro. O TTL do `semantic_cache` é de 60 minutos, para sobreviver ao trajeto entre o warmup e a reunião.
 
-Backend lint (ruff configured in `pyproject.toml`, no wrapper script):
+Lint do backend (ruff configurado no `pyproject.toml`, sem script wrapper):
 ```bash
 cd backend && ruff check .
 ```
 
-Frontend build: `cd frontend && npm run build` (no frontend lint/test script defined).
+Build do frontend: `cd frontend && npm run build` (não há script de lint/test no frontend).
 
-## Architecture
+## Arquitetura
 
-**Flow:** frontend (React/Vite, `frontend/src/api.js`) → REST → backend (FastAPI, `backend/app/main.py`), JWT bearer auth via `/api/auth/token`, admin actions (toggling an agent, viewing eval history) gated by `X-Admin-Key` header.
+**Fluxo:** frontend (React/Vite, `frontend/src/api.js`) → REST → backend (FastAPI, `backend/app/main.py`), autenticação JWT bearer via `/api/auth/token`, ações administrativas (ligar/desligar um agente, ver histórico de eval) protegidas pelo cabeçalho `X-Admin-Key`.
 
-**Orchestration** (`backend/app/orchestration.py`, `router.py`, `agents.py`): each turn passes an input guardrail, then routes via a cheap deterministic rule (`multiagent_brain.routing_rules`) or, only if no rule matched at all, the orchestrator LLM classifies intent. **The LLM never overrides an already-confident deterministic decision** — sampling variance made routing non-reproducible across near-identical messages when it could. `cheap_route`'s tie-break is by seeded `priority`; more specific intents (`garantia`/`fidelidade`/`logistica`) are seeded above generic ones (`status_pedido`/`fatura`) so a compound message routes to the right first agent. A turn can chain up to `MAX_HOPS = 4` agents (e.g. `support_agent` diagnoses → `product_agent` recommends → `order_agent` processes the trade, its only restricted write → `billing_agent`/`logistics_agent` confirms the follow-up); every handoff persists to `agent_handoffs`/`agent_traces` and drives the UI Timeline/Inspector. A genuinely independent compound question (order status + invoice) instead fans out `order_agent` + `billing_agent` in parallel via `asyncio.gather` (`router.py:detect_fanout`, `orchestration.py:_run_fanout`) rather than chaining — restricted to that pair on purpose, since `support_agent`/`product_agent` have a real diagnose-then-recommend dependency. Each agent's grounding instructions (`agents.py:GROUNDING_RULES`) tell it to silently ignore parts of a compound message outside its own domain rather than commenting on them — without this, agents mid-chain hallucinate policy for domains they don't own.
+**Orquestração** (`backend/app/orchestration.py`, `router.py`, `agents.py`): cada turno passa por um guardrail de entrada e então é roteado por uma regra determinística barata (`multiagent_brain.routing_rules`) ou, apenas se nenhuma regra casar, o LLM orquestrador classifica a intenção. **O LLM nunca sobrepõe uma decisão determinística já confiante** — quando podia, a variância de amostragem tornava o roteamento não reprodutível entre mensagens quase idênticas. O desempate do `cheap_route` é pelo `priority` semeado; intenções mais específicas (`garantia`/`fidelidade`/`logistica`) são semeadas acima das genéricas (`status_pedido`/`fatura`), para que uma mensagem composta caia no primeiro agente certo. Um turno pode encadear até `MAX_HOPS = 4` agentes (por exemplo `support_agent` diagnostica → `product_agent` recomenda → `order_agent` processa a troca, sua única escrita restrita → `billing_agent`/`logistics_agent` confirma o desdobramento); cada handoff é persistido em `agent_handoffs`/`agent_traces` e alimenta o Timeline/Inspector da UI. Já uma pergunta composta genuinamente independente (status do pedido + fatura) faz fan-out de `order_agent` + `billing_agent` em paralelo via `asyncio.gather` (`router.py:detect_fanout`, `orchestration.py:_run_fanout`) em vez de encadear — restrito a esse par de propósito, já que `support_agent`/`product_agent` têm uma dependência real de diagnosticar-e-então-recomendar. As instruções de grounding de cada agente (`agents.py:GROUNDING_RULES`) mandam ignorar silenciosamente as partes de uma mensagem composta fora do próprio domínio, em vez de comentá-las — sem isso, agentes no meio da cadeia alucinam políticas de domínios que não são deles.
 
-**Agent config is data, not code**: `multiagent_brain.agent_registry` holds each agent's model, persona, tools, and budget — editable at runtime with no redeploy (`AgentUpdate` model in `backend/app/models.py`).
+**Configuração de agente é dado, não código**: `multiagent_brain.agent_registry` guarda o modelo, a persona, as ferramentas e o orçamento de cada agente — editáveis em tempo de execução sem redeploy (modelo `AgentUpdate` em `backend/app/models.py`).
 
-**LLM-grounded responses** (`agents.py:llm_synthesize`): retrieval stays 100% deterministic and ownership-safe (Mongo query built in Python, never by the model), but the final sentence is generated by Anthropic over the *already-fetched* document(s) — covers arbitrary phrasing instead of only templated intents. Falls back to an f-string template when there's no API key or the call fails, so `DEMO_MODE`/CI stay deterministic.
+**Respostas ancoradas por LLM** (`agents.py:llm_synthesize`): a recuperação continua 100% determinística e segura quanto a propriedade do dado (query Mongo construída em Python, nunca pelo modelo), mas a frase final é gerada pela Anthropic sobre o(s) documento(s) *já recuperado(s)* — o que cobre formulações arbitrárias, e não apenas intenções templadas. Cai para um template de f-string quando não há chave de API ou a chamada falha, de modo que `DEMO_MODE`/CI seguem determinísticos.
 
-**Write actions** (beyond `order_agent`'s status update, restricted to an approved-values allowlist): `support_agent` opens a real `support_tickets` document on explicit escalation ("atendente"/"chamado"/"escalar" — not on "no KB evidence," since the `DEMO_MODE` local-rank fallback always returns *some* article regardless of relevance); `loyalty_agent` processes a real point redemption (`$inc` on `loyalty_accounts.points`, restricted to a fixed `REWARD_CATALOG` cost table, plus a `redemptions` audit doc) or hands off to `product_agent` for "redeem points for a product"; `logistics_agent` can flag `shipments.reschedule_requested: true` (single restricted field). `order_agent`'s post-write handoff to `billing_agent`/`logistics_agent` runs regardless of whether the status *actually changed* this turn — depending on an in-turn state change meant replaying "quero trocar" after an earlier turn/eval case had already flipped the order silently dropped the handoff.
+**Ações de escrita** (além da atualização de status do `order_agent`, restrita a uma allowlist de valores aprovados): o `support_agent` abre um documento real em `support_tickets` em caso de escalonamento explícito ("atendente"/"chamado"/"escalar" — e não por "sem evidência na KB", já que o fallback de ranking local do `DEMO_MODE` sempre devolve *algum* artigo, relevante ou não); o `loyalty_agent` processa um resgate real de pontos (`$inc` em `loyalty_accounts.points`, restrito a uma tabela fixa de custos `REWARD_CATALOG`, mais um documento de auditoria em `redemptions`) ou faz handoff para o `product_agent` no caso de "resgatar pontos por um produto"; o `logistics_agent` pode marcar `shipments.reschedule_requested: true` (um único campo restrito). O handoff pós-escrita do `order_agent` para `billing_agent`/`logistics_agent` roda independentemente de o status ter *de fato mudado* neste turno — depender de uma mudança de estado no turno fazia com que repetir "quero trocar" depois de um turno/caso de eval anterior já ter virado o pedido derrubasse o handoff em silêncio.
 
-**Security model** (`backend/app/security.py`, `policies.py`, `guardrails.py`): `customer_key` comes only from the JWT, never the request payload — every query is filtered by it, filters reconstructed server-side. Conversations are bounded (20 messages / 24h TTL, resumable via `GET /api/conversations/latest`, which also replays the last turn's timeline so a resumed session doesn't look like nothing happened); audit events expire after 30 days. `budget.py` enforces per-turn token budgets (`BudgetExceeded`); `rate_limit.py` is a sliding-window limiter.
+**Modelo de segurança** (`backend/app/security.py`, `policies.py`, `guardrails.py`): a `customer_key` vem apenas do JWT, nunca do payload da requisição — toda query é filtrada por ela, com os filtros reconstruídos no servidor. As conversas são limitadas (20 mensagens / TTL de 24h, retomáveis via `GET /api/conversations/latest`, que também reproduz a timeline do último turno para que uma sessão retomada não pareça vazia); eventos de auditoria expiram em 30 dias. O `budget.py` aplica orçamentos de token por turno (`BudgetExceeded`); o `rate_limit.py` é um limitador de janela deslizante.
 
-**Self-reinforcing guardrail** (`guardrails.py:check_input`): static denylist + near-miss check first (free). If nothing matched *and* the message didn't already hit a confident routing rule (`skip_semantic` — routing-safe messages skip the extra LLM call entirely, cutting real Anthropic cost), a cheap LLM classifier catches novel manipulation attempts and writes a block back into `guardrail_denylist` so the next similar attempt is free. A third verdict, `DUVIDA` (abstention), logs an uncertain case to `guardrail_candidates` for human review instead of blocking a possibly-legitimate customer.
+**Guardrail auto-reforçado** (`guardrails.py:check_input`): primeiro a denylist estática + a checagem de near-miss (grátis). Se nada casou *e* a mensagem também não bateu numa regra de roteamento confiante (`skip_semantic` — mensagens seguras do ponto de vista de roteamento pulam inteiramente a chamada extra ao LLM, cortando custo real na Anthropic), um classificador LLM barato pega tentativas novas de manipulação e escreve um bloqueio de volta em `guardrail_denylist`, de modo que a próxima tentativa semelhante sai de graça. Um terceiro veredito, `DUVIDA` (abstenção), registra o caso incerto em `guardrail_candidates` para revisão humana, em vez de bloquear um cliente possivelmente legítimo.
 
-**Retrieval** (`backend/app/retrieval.py`): Atlas Vector Search with Automated Embedding (`voyage-4`) over the product catalog, ranked by relevance (0.55) + rating (0.30) + stock (0.15) in one aggregation; hybrid BM25+vector RRF over `kb_articles`.
+**Recuperação** (`backend/app/retrieval.py`): Atlas Vector Search com Automated Embedding (`voyage-4`) sobre o catálogo de produtos, ranqueado por relevância (0,55) + avaliação (0,30) + estoque (0,15) em uma única agregação; RRF híbrido BM25+vetorial sobre `kb_articles`.
 
-**Data store abstraction** (`backend/app/database.py`): `DataStore` toggles between real Atlas and an in-memory backend via `DEMO_MODE`, same contracts either way — what lets `smoke.py`/`eval.py`/CI run without live Atlas access. `agent_handoffs`/`agent_traces` get a `$jsonSchema` validator (`create_schema_validators`, no-op in `DEMO_MODE`) so MongoDB itself rejects a malformed document, not just the Python layer.
+**Abstração do armazenamento** (`backend/app/database.py`): o `DataStore` alterna entre o Atlas real e um backend em memória via `DEMO_MODE`, com os mesmos contratos nos dois casos — é o que permite `smoke.py`/`eval.py`/CI rodarem sem acesso a um Atlas ao vivo. `agent_handoffs`/`agent_traces` recebem um validador `$jsonSchema` (`create_schema_validators`, inócuo em `DEMO_MODE`), para que o próprio MongoDB rejeite um documento malformado, não só a camada Python.
 
-**Live observability**: `GET /api/events/stream` (SSE) tails a Change Stream on `agent_handoffs`, filtered to the caller's own conversations (poll fallback in `DEMO_MODE`); the frontend shows only the latest handoff, reconnecting automatically on drop (`api.js:streamEvents`). Every `TimelineEvent` also carries an `op` (`read`/`write`/`vectorSearch`/`hybridSearch`/`changeStream`), rendered as a per-turn "collections in action" panel and rolled into cumulative `collection.<name>.<op>` counters in `metrics.py` (`GET /api/metrics`).
+**Observabilidade ao vivo**: `GET /api/events/stream` (SSE) acompanha um Change Stream em `agent_handoffs`, filtrado às conversas do próprio chamador (com fallback por polling em `DEMO_MODE`); o frontend mostra apenas o handoff mais recente e reconecta sozinho ao cair (`api.js:streamEvents`). Todo `TimelineEvent` também carrega um `op` (`read`/`write`/`vectorSearch`/`hybridSearch`/`changeStream`), renderizado como um painel de "coleções em ação" por turno e agregado em contadores cumulativos `collection.<name>.<op>` no `metrics.py` (`GET /api/metrics`).
 
-**Frontend demo prompts** (`DEMOS_BY_IDENTITY` in `App.jsx`): every entry per identity triggers 2+ agents, a real write, or a guardrail — no plain single-agent reads. Two routing gotchas surfaced building these: a keyword belonging to a *later* agent in an intended chain (e.g. "transportadora") can outrank an *earlier* agent's trigger word (e.g. "troca") in `cheap_route`'s priority tie-break and skip the hop — phrase compound messages to avoid the collision (e.g. "entrega" instead of "transportadora"); Portuguese gender agreement matters for substring keyword checks ("parecida" needs its own entry, not just "parecido").
+**Prompts de demo do frontend** (`DEMOS_BY_IDENTITY` no `App.jsx`): cada entrada por identidade aciona 2+ agentes, uma escrita real ou um guardrail — nada de leituras simples de um agente só. Duas armadilhas de roteamento apareceram ao construir isso: uma palavra-chave que pertence a um agente *posterior* na cadeia pretendida (por exemplo "transportadora") pode superar a palavra-gatilho de um agente *anterior* (por exemplo "troca") no desempate por prioridade do `cheap_route` e pular o hop — formule mensagens compostas para evitar a colisão (por exemplo "entrega" em vez de "transportadora"); e a concordância de gênero em português importa nas checagens por substring ("parecida" precisa da própria entrada, não basta "parecido").
 
-No containerization (no Dockerfile/docker-compose) — local dev only, via venv + npm, with strict non-fallback ports for both services.
+Sem containerização (nada de Dockerfile/docker-compose) — apenas desenvolvimento local, via venv + npm, com portas estritas e sem fallback para os dois serviços.
 
-## Known gaps (verified against code, not just docs)
+## Lacunas conhecidas (verificadas no código, não só na documentação)
 
-- Metrics (`backend/app/metrics.py`) are in-process only, reset on restart — no persistence/aggregation across instances.
-- No CI/Docker/deployment config.
-- LLM synthesis and the semantic guardrail both cost real Anthropic tokens per turn — fine for a demo, would need caching/sampling tuning before high-volume production use.
+- As métricas (`backend/app/metrics.py`) são apenas em processo e zeram no restart — sem persistência/agregação entre instâncias.
+- Sem configuração de CI/Docker/deploy.
+- A síntese por LLM e o guardrail semântico custam tokens reais da Anthropic por turno — tudo bem para uma demo, mas precisariam de ajuste de cache/amostragem antes de uso em produção de alto volume.
