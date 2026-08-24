@@ -9,7 +9,7 @@ lsof -nP -iTCP:5191 -sTCP:LISTEN >/dev/null 2>&1 && FRONTEND_RUNNING=1
 
 if [ "$BACKEND_RUNNING" -eq 1 ] && [ "$FRONTEND_RUNNING" -eq 1 ]; then
   echo "PoV já está completa nas portas 8031 e 5191. Abrindo no navegador."
-  open http://127.0.0.1:5191
+  if [ "${POV_NO_OPEN:-0}" != "1" ]; then open http://127.0.0.1:5191; fi
   exit 0
 fi
 
@@ -56,6 +56,6 @@ if [ "$READY" -ne 1 ]; then
   exit 1
 fi
 
-open http://127.0.0.1:5191
+if [ "${POV_NO_OPEN:-0}" != "1" ]; then open http://127.0.0.1:5191; fi
 
 wait
