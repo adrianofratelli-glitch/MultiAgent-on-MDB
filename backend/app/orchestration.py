@@ -258,6 +258,7 @@ class OrchestrationService:
                 break
             await metrics.increment(f"agent.{current}.turns")
             turn_context = {
+                "conversation_id": conversation_id,
                 "active_order_id": (conversation or {}).get("active_order_id"),
                 "active_invoice_id": (conversation or {}).get("active_invoice_id"),
                 "handoff_path": list(handoff_path),
@@ -361,7 +362,7 @@ class OrchestrationService:
             budget.reserve(target, estimate_tokens(masked))
             await metrics.increment(f"agent.{target}.turns")
         area_labels = {"order_agent": "pedido/entrega", "billing_agent": "fatura/pagamento"}
-        turn_context = {"active_order_id": (conversation or {}).get("active_order_id"), "active_invoice_id": (conversation or {}).get("active_invoice_id")}
+        turn_context = {"conversation_id": conversation_id, "active_order_id": (conversation or {}).get("active_order_id"), "active_invoice_id": (conversation or {}).get("active_invoice_id")}
         results = await asyncio.gather(*[
             RUNNERS[target](
                 self.store, masked, customer, self.llm, budget, registry.get(target),

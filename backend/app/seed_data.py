@@ -12,9 +12,16 @@ CUSTOMERS = [
 
 ORDERS = [
     {"order_id": "PED-1001", "owner_customer_key": "ana", "product": "Fone Pulse X", "status": "enviado", "timeline": [{"status": "criado", "at": "2026-07-10"}, {"status": "enviado", "at": "2026-07-14"}]},
-    {"order_id": "PED-1002", "owner_customer_key": "ana", "product": "Teclado Air", "status": "entregue", "timeline": [{"status": "entregue", "at": "2026-07-12"}]},
+    {"order_id": "PED-1002", "owner_customer_key": "ana", "product": "Teclado Air", "status": "troca_solicitada", "replacement_order_id": "PED-1012", "replacement_reason": "tecla travando", "timeline": [{"status": "criado", "at": "2026-07-02"}, {"status": "entregue", "at": "2026-07-12"}, {"status": "troca_solicitada", "at": "2026-07-16"}]},
+    {"order_id": "PED-1012", "owner_customer_key": "ana", "product": "Teclado Air", "status": "entregue", "replacement_reason": "reposição única", "timeline": [{"status": "criado", "at": "2026-07-18"}, {"status": "entregue", "at": "2026-07-22"}]},
     {"order_id": "PED-2001", "owner_customer_key": "bruno", "product": "Monitor View 27", "status": "processando", "timeline": [{"status": "criado", "at": "2026-07-15"}]},
-    {"order_id": "PED-3001", "owner_customer_key": "carla", "product": "Smartwatch Fit", "status": "enviado", "timeline": [{"status": "enviado", "at": "2026-07-13"}]},
+    # Cadeia de trocas da Carla: mesmo Smartwatch Fit trocado três vezes. Cada elo é um pedido
+    # comum; o relacionamento é `replacement_order_id`. Só a travessia ($graphLookup) revela que
+    # é defeito recorrente de lote e não um cliente azarado — ver app/graph.py.
+    {"order_id": "PED-3001", "owner_customer_key": "carla", "product": "Smartwatch Fit", "status": "troca_solicitada", "replacement_order_id": "PED-3011", "replacement_reason": "tela não liga", "timeline": [{"status": "criado", "at": "2026-05-02"}, {"status": "enviado", "at": "2026-05-06"}, {"status": "troca_solicitada", "at": "2026-05-20"}]},
+    {"order_id": "PED-3011", "owner_customer_key": "carla", "product": "Smartwatch Fit", "status": "troca_solicitada", "replacement_order_id": "PED-3021", "replacement_reason": "mesmo defeito: tela não liga", "timeline": [{"status": "criado", "at": "2026-05-22"}, {"status": "entregue", "at": "2026-05-27"}, {"status": "troca_solicitada", "at": "2026-06-14"}]},
+    {"order_id": "PED-3021", "owner_customer_key": "carla", "product": "Smartwatch Fit", "status": "troca_solicitada", "replacement_order_id": "PED-3031", "replacement_reason": "mesmo defeito: tela não liga", "timeline": [{"status": "criado", "at": "2026-06-16"}, {"status": "entregue", "at": "2026-06-21"}, {"status": "troca_solicitada", "at": "2026-07-09"}]},
+    {"order_id": "PED-3031", "owner_customer_key": "carla", "product": "Smartwatch Fit", "status": "enviado", "replacement_reason": "terceira reposição", "timeline": [{"status": "criado", "at": "2026-07-11"}, {"status": "enviado", "at": "2026-07-13"}]},
     {"order_id": "PED-3002", "owner_customer_key": "carla", "product": "Carregador Duo", "status": "entregue", "timeline": [{"status": "entregue", "at": "2026-07-11"}]},
     {"order_id": "PED-4001", "owner_customer_key": "diego", "product": "Caixa Sonora Mini", "status": "processando", "timeline": [{"status": "criado", "at": "2026-07-14"}]},
 ]
@@ -415,6 +422,18 @@ DEMO_SCENARIOS = [
         "capabilities": ["rota determinística", "policy read", "não bloqueada"],
         "expected_agents": ["warranty_agent"], "expect_route_source": "rules",
         "expect_handoffs": 0, "expect_revisit": False, "warmup": True,
+    },
+    {
+        # Travessia de grafo + escalonamento pausável. A mensagem evita de propósito as
+        # palavras "troca"/"trocar": elas pertencem ao order_agent e venceriam "garantia" no
+        # desempate por prioridade do cheap_route, pulando o agente que consulta a cadeia.
+        "scenario_id": "carla-recurring-defect-graph", "customer_key": "carla", "position": 8,
+        "label": "Cadeia de trocas ($graphLookup) escala para revisão humana",
+        "message": "o Smartwatch Fit do pedido PED-3001 quebrou de novo — a garantia cobre mais uma reposição?",
+        "capabilities": ["$graphLookup", "defeito de lote", "escalonamento pausável", "decisão registrada"],
+        "expected_agents": ["warranty_agent"], "expect_route_source": "rules",
+        "expect_handoffs": 0, "expect_write_collection": "pending_reviews",
+        "expect_revisit": False, "warmup": False,
     },
     {
         "scenario_id": "diego-paraphrase-freebie", "customer_key": "diego", "position": 6,

@@ -16,9 +16,11 @@ from .budget import BudgetExceeded
 from .cascade import CACHE_POLICY
 from .config import get_settings
 from .database import DataStore, get_store, set_store, utcnow
+from .decisions import decision_trail
+from .reviews import list_reviews, override_rate, resolve_review
 from .llm import LLMGateway
 from .metrics import metrics
-from .models import AgentUpdate, ChatRequest, ChatResponse, TokenRequest
+from .models import AgentUpdate, ChatRequest, ChatResponse, ReviewResolution, TokenRequest
 from .orchestration import OrchestrationService
 from .rate_limit import SlidingWindowLimiter
 from .security import current_customer, issue_token, request_identity_key, require_admin
@@ -186,6 +188,30 @@ async def handoffs(conversation_id: str = Query(min_length=4, max_length=80), cu
     return [{key: value for key, value in item.items() if key != "_id"} for item in items]
 
 
+@app.get("/api/decisions")
+async def decisions(
+    subject_id: str | None = Query(default=None, max_length=64),
+    customer: dict = Depends(current_customer),
+    store: DataStore = Depends(get_store),
+):
+    """Trilha de conformidade do próprio chamador: decisões imutáveis + eventos de auditoria.
+
+    A `customer_key` vem do JWT, nunca do query string — a trilha de um cliente não é
+    alcançável por outro nem informando o subject_id certo.
+    """
+    return await decision_trail(store, customer["customer_key"], subject_id=subject_id)
+
+
+@app.get("/api/reviews")
+async def my_reviews(
+    status_filter: str = Query(default="pending", pattern="^(pending|resolved)$", alias="status"),
+    customer: dict = Depends(current_customer),
+    store: DataStore = Depends(get_store),
+):
+    """Casos do próprio cliente que estão (ou estiveram) aguardando decisão humana."""
+    return await list_reviews(store, customer_key=customer["customer_key"], status=status_filter)
+
+
 @app.get("/api/memory/{customer_key}")
 async def memory(customer_key: str, customer: dict = Depends(current_customer), store: DataStore = Depends(get_store)):
     if customer_key != customer["customer_key"]:
@@ -334,6 +360,37 @@ async def update_agent(agent_key: str, payload: AgentUpdate, store: DataStore = 
         raise HTTPException(status.HTTP_404_NOT_FOUND, "agente não encontrado")
     await store.insert_one("admin_audit", {"action": "agent.update", "target": agent_key, "changes": update, "at": utcnow()})
     return {"ok": True, "agent_key": agent_key, "changes": update}
+
+
+@app.get("/api/admin/reviews", dependencies=[Depends(require_admin)])
+async def pending_reviews(
+    status_filter: str = Query(default="pending", pattern="^(pending|resolved)$", alias="status"),
+    store: DataStore = Depends(get_store),
+):
+    """Fila do analista: todos os casos pausados, de todos os clientes."""
+    return {"reviews": await list_reviews(store, status=status_filter),
+            "override": await override_rate(store)}
+
+
+@app.post("/api/admin/reviews/{review_id}/resolve", dependencies=[Depends(require_admin)])
+async def resolve_pending_review(review_id: str, payload: ReviewResolution, store: DataStore = Depends(get_store)):
+    """Fecha a pausa: grava a decisão humana (imutável) e devolve o caso ao agente.
+
+    O handoff de volta é gravado em `agent_handoffs`, então a UI do cliente é notificada ao vivo
+    pelo Change Stream que já existe — sem canal novo.
+    """
+    try:
+        resolved = await resolve_review(store, review_id, human_decision=payload.decision,
+                                        resolved_by=payload.resolved_by, note=payload.note)
+    except RuntimeError as exc:
+        # A decisão final não foi registrada, então a revisão continua pendente de propósito.
+        # 503 e não 500: é uma falha transitória de gravação, e repetir a chamada é a ação certa.
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(exc)) from exc
+    if not resolved:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "revisão não encontrada ou já resolvida")
+    await store.insert_one("admin_audit", {"action": "review.resolve", "target": review_id,
+                                           "changes": {"decision": payload.decision}, "at": utcnow()})
+    return resolved
 
 
 @app.post("/api/admin/guardrails/candidates/{candidate_id}/approve", dependencies=[Depends(require_admin)])

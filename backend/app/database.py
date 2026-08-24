@@ -1,13 +1,17 @@
 import asyncio
 import copy
+import logging
 import re
 from collections import defaultdict, deque
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any
 
 from pymongo import ASCENDING, AsyncMongoClient
 
 from .config import Settings
+
+logger = logging.getLogger(__name__)
 
 
 def utcnow() -> datetime:
@@ -38,6 +42,50 @@ def _matches(document: dict, query: dict) -> bool:
     return True
 
 
+class Transaction:
+    """Handle de uma transação em curso.
+
+    `driver_session` é a sessão do pymongo, ou `None` quando a atomicidade não vem do driver
+    — em `DEMO_MODE` ela é emulada por snapshot, e num mongod standalone simplesmente não
+    existe. Por isso o objeto existe sempre: é ele que responde "estou dentro de uma
+    transação?", pergunta que `session is None` não conseguia responder.
+
+    `atomic` diz se um rollback é de fato possível neste escopo. Quem grava usa isso para
+    escolher entre propagar a exceção (dá para desfazer: propagar É o rollback) e registrar
+    a falha sem derrubar o turno (não dá para desfazer: a ação de negócio já aconteceu e
+    somar uma tela de erro ao cliente não melhora nada).
+    """
+
+    __slots__ = ("driver_session", "atomic")
+
+    def __init__(self, driver_session=None, *, atomic: bool = True):
+        self.driver_session = driver_session
+        self.atomic = atomic
+
+
+def is_transient_transaction_error(exc: BaseException) -> bool:
+    """True quando o MongoDB pede explicitamente para repetir a operação.
+
+    Duas transações mexendo no MESMO documento produzem `WriteConflict`, e o servidor marca
+    o erro com o label `TransientTransactionError` — que significa "tente de novo", não
+    "deu errado". Sem tratar isso, dois analistas clicando no mesmo caso recebiam HTTP 500
+    em vez do 404 correto ("alguém já resolveu").
+
+    A checagem é pelo label, não pelo código: é o contrato que o driver garante, e cobre
+    os outros erros transitórios (eleição de primário, timeout de commit) de graça.
+    """
+    labels = getattr(exc, "_error_labels", None) or getattr(exc, "error_labels", None) or set()
+    if callable(getattr(exc, "has_error_label", None)):
+        return bool(exc.has_error_label("TransientTransactionError")
+                    or exc.has_error_label("UnknownTransactionCommitResult"))
+    return "TransientTransactionError" in labels
+
+
+def _driver_session(session):
+    """Desembrulha o handle para o que o pymongo espera receber em `session=`."""
+    return session.driver_session if isinstance(session, Transaction) else session
+
+
 class DataStore:
     """Uma porta pequena para Atlas com fallback determinístico para testes locais."""
 
@@ -47,6 +95,10 @@ class DataStore:
         self.client: AsyncMongoClient | None = None
         self._data: dict[str, dict[str, list[dict]]] = defaultdict(lambda: defaultdict(list))
         self._lock = asyncio.Lock()
+        # Transação multi-documento exige replica set (ou cluster shardeado). Todo Atlas é
+        # replica set, mas um mongod standalone local não é — e ali a escrita precisa
+        # continuar acontecendo, só que sem atomicidade e dizendo isso em voz alta.
+        self._transactions_available = False
 
     async def connect(self) -> None:
         if self.memory:
@@ -57,7 +109,12 @@ class DataStore:
             connectTimeoutMS=5000,
             appname=self.settings.app_name,
         )
-        await self.client.admin.command("ping")
+        hello = await self.client.admin.command("hello")
+        # setName = replica set; "isdbgrid" = mongos à frente de um cluster shardeado.
+        self._transactions_available = bool(hello.get("setName")) or hello.get("msg") == "isdbgrid"
+        if not self._transactions_available:
+            logger.warning("servidor sem suporte a transação multi-documento (standalone): "
+                           "escrita de negócio e decisão serão sequenciais, sem atomicidade")
 
     async def close(self) -> None:
         if self.client:
@@ -79,9 +136,53 @@ class DataStore:
         await self.client.admin.command("ping")  # type: ignore[union-attr]
         return True
 
-    async def find_one(self, name: str, query: dict, *, brain: bool = False) -> dict | None:
+    @asynccontextmanager
+    async def transaction(self):
+        """Escrita de negócio e registro de decisão como uma coisa só.
+
+        O problema que isto resolve: mudar o status de um pedido e gravar a decisão que o
+        justifica eram dois `await` em sequência. Uma falha entre os dois deixava o mundo
+        alterado sem registro — o furo que a trilha de auditoria existe para impedir, aberto
+        exatamente no meio dela. Com a transação, ou as duas acontecem, ou nenhuma.
+
+        Devolve um handle de sessão para passar adiante (`session=`), ou `None` quando não
+        há transação disponível. `None` é um caminho legítimo, não um erro: em `DEMO_MODE`
+        a atomicidade é emulada por snapshot, e num mongod standalone a escrita continua
+        acontecendo de forma sequencial, com o aviso já emitido no connect.
+
+        Importante: todas as collections envolvidas precisam viver no MESMO banco. É o caso
+        de `orders`/`loyalty_accounts`/`shipments` e `agent_decisions`/`agent_audit_events`;
+        o banco `multiagent_brain` (configuração) fica de fora, e não participa de escrita.
+        """
+        if self.memory:
+            # Emulação por snapshot: dá all-or-nothing de verdade em DEMO_MODE/CI, então o
+            # teste de rollback testa comportamento, não um no-op que sempre passa.
+            async with self._lock:
+                snapshot = copy.deepcopy(self._data)
+            try:
+                yield Transaction(None, atomic=True)
+            except Exception:
+                async with self._lock:
+                    self._data.clear()
+                    for db_name, collections in snapshot.items():
+                        for collection, documents in collections.items():
+                            self._data[db_name][collection] = documents
+                raise
+            return
+
+        if not self._transactions_available:
+            # Sem replica set não há como desfazer: `atomic=False` avisa quem grava para
+            # não propagar uma exceção que ninguém consegue reverter.
+            yield Transaction(None, atomic=False)
+            return
+
+        async with self.client.start_session() as session:  # type: ignore[union-attr]
+            async with await session.start_transaction():
+                yield Transaction(session, atomic=True)
+
+    async def find_one(self, name: str, query: dict, *, brain: bool = False, session=None) -> dict | None:
         if not self.memory:
-            return await self._collection(name, brain).find_one(query)
+            return await self._collection(name, brain).find_one(query, session=_driver_session(session))
         async with self._lock:
             return next((copy.deepcopy(d) for d in self._bucket(name, brain) if _matches(d, query)), None)
 
@@ -116,10 +217,10 @@ class DataStore:
             return await self._collection(name, brain).count_documents(query)
         return len(await self.find_many(name, query, brain=brain, limit=100_000))
 
-    async def insert_one(self, name: str, document: dict, *, brain: bool = False) -> None:
+    async def insert_one(self, name: str, document: dict, *, brain: bool = False, session=None) -> None:
         payload = copy.deepcopy(document)
         if not self.memory:
-            await self._collection(name, brain).insert_one(payload)
+            await self._collection(name, brain).insert_one(payload, session=_driver_session(session))
             return
         async with self._lock:
             payload.setdefault("_id", f"{name}-{len(self._bucket(name, brain)) + 1}")
@@ -144,10 +245,12 @@ class DataStore:
                 bucket.append(payload)
 
     async def update_one(
-        self, name: str, query: dict, update: dict, *, brain: bool = False, upsert: bool = False
+        self, name: str, query: dict, update: dict, *, brain: bool = False, upsert: bool = False,
+        session=None,
     ) -> int:
         if not self.memory:
-            result = await self._collection(name, brain).update_one(query, update, upsert=upsert)
+            result = await self._collection(name, brain).update_one(
+                query, update, upsert=upsert, session=_driver_session(session))
             return result.modified_count
         async with self._lock:
             bucket = self._bucket(name, brain)
@@ -247,6 +350,56 @@ class DataStore:
                     },
                 }
             },
+            "pending_reviews": {
+                "$jsonSchema": {
+                    "bsonType": "object",
+                    "required": ["review_id", "agent", "action", "subject_id", "customer_key", "recommended_action", "status", "created_at"],
+                    "properties": {
+                        "review_id": {"bsonType": "string", "pattern": "^REV-[0-9A-F]{10}$"},
+                        "agent": {"bsonType": "string"},
+                        "customer_key": {"bsonType": "string", "minLength": 1},
+                        "status": {"enum": ["pending", "resolved", "expired"]},
+                        "recommended_action": {"bsonType": "string", "minLength": 3},
+                        "human_decision": {"bsonType": ["string", "null"]},
+                        "overrode_agent": {"bsonType": ["bool", "null"]},
+                        "created_at": {"bsonType": "date"},
+                    },
+                }
+            },
+            "agent_decisions": {
+                "$jsonSchema": {
+                    "bsonType": "object",
+                    "required": ["decision_id", "action", "subject_id", "customer_key", "agent", "decided_by", "reasoning", "at"],
+                    "properties": {
+                        "decision_id": {"bsonType": "string", "pattern": "^DEC-[0-9A-F]{12}$"},
+                        "action": {"bsonType": "string", "minLength": 3},
+                        "subject_id": {"bsonType": "string"},
+                        "customer_key": {"bsonType": "string", "minLength": 1},
+                        "agent": {"bsonType": "string"},
+                        "decided_by": {"enum": ["agent", "human"]},
+                        "reasoning": {"bsonType": "string", "minLength": 3},
+                        "confidence": {"bsonType": ["double", "int", "null"], "minimum": 0, "maximum": 1},
+                        "risk_factors": {"bsonType": "array", "items": {"bsonType": "string"}},
+                        "escalated": {"bsonType": "bool"},
+                        "supersedes": {"bsonType": ["string", "null"]},
+                        "at": {"bsonType": "date"},
+                    },
+                }
+            },
+            "agent_audit_events": {
+                "$jsonSchema": {
+                    "bsonType": "object",
+                    "required": ["event_id", "event_type", "customer_key", "severity", "at"],
+                    "properties": {
+                        "event_id": {"bsonType": "string", "pattern": "^AUD-[0-9A-F]{12}$"},
+                        "event_type": {"bsonType": "string", "minLength": 3},
+                        "decision_id": {"bsonType": ["string", "null"]},
+                        "customer_key": {"bsonType": "string", "minLength": 1},
+                        "severity": {"enum": ["info", "warning", "critical"]},
+                        "at": {"bsonType": "date"},
+                    },
+                }
+            },
             "agent_traces": {
                 "$jsonSchema": {
                     "bsonType": "object",
@@ -279,7 +432,9 @@ class DataStore:
             return
         definitions = {
             "customers": [[("customer_key", ASCENDING)]],
-            "orders": [[("order_id", ASCENDING)], [("owner_customer_key", ASCENDING), ("status", ASCENDING)]],
+            # 3º índice: $graphLookup casa replacement_order_id -> order_id a cada salto;
+            # sem índice em connectToField a travessia vira collection scan por salto.
+            "orders": [[("order_id", ASCENDING)], [("owner_customer_key", ASCENDING), ("status", ASCENDING)], [("owner_customer_key", ASCENDING), ("replacement_order_id", ASCENDING)]],
             "invoices": [[("invoice_id", ASCENDING)], [("owner_customer_key", ASCENDING), ("due_date", ASCENDING)]],
             "loyalty_accounts": [[("customer_key", ASCENDING)]],
             "shipments": [[("order_id", ASCENDING)], [("owner_customer_key", ASCENDING)]],
@@ -298,8 +453,15 @@ class DataStore:
             "eval_runs": [[("at", ASCENDING)]],
             "support_tickets": [[("customer_key", ASCENDING), ("created_at", ASCENDING)]],
             "redemptions": [[("customer_key", ASCENDING), ("at", ASCENDING)]],
+            # Sem TTL de propósito: agent_traces/agent_handoffs são observabilidade e expiram em
+            # 30 dias; decisão e trilha de auditoria são registro de conformidade e ficam.
+            # Idempotência da pausa: (subject_id, action, status) é o que open_review consulta
+            # antes de abrir, para o analista não receber o mesmo caso duas vezes.
+            "pending_reviews": [[("review_id", ASCENDING)], [("subject_id", ASCENDING), ("action", ASCENDING), ("status", ASCENDING)], [("status", ASCENDING), ("created_at", ASCENDING)]],
+            "agent_decisions": [[("decision_id", ASCENDING)], [("customer_key", ASCENDING), ("at", ASCENDING)], [("subject_id", ASCENDING), ("at", ASCENDING)]],
+            "agent_audit_events": [[("decision_id", ASCENDING)], [("customer_key", ASCENDING), ("at", ASCENDING)], [("subject_id", ASCENDING), ("at", ASCENDING)]],
         }
-        unique = {("customers", 0), ("orders", 0), ("invoices", 0), ("agent_conversations", 0), ("guardrail_denylist", 0), ("loyalty_accounts", 0), ("shipments", 0), ("warranty_policies", 0)}
+        unique = {("customers", 0), ("orders", 0), ("agent_decisions", 0), ("agent_audit_events", 0), ("pending_reviews", 0), ("invoices", 0), ("agent_conversations", 0), ("guardrail_denylist", 0), ("loyalty_accounts", 0), ("shipments", 0), ("warranty_policies", 0)}
         ttl = {
             ("agent_conversations", 1): 86400,
             ("agent_handoffs", 1): 30 * 86400,

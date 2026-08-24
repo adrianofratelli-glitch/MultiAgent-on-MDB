@@ -39,7 +39,7 @@ class TimelineEvent(BaseModel):
     title: str
     agent: str | None = None
     collection: str | None = None
-    op: Literal["read", "write", "vectorSearch", "hybridSearch", "changeStream"] | None = None
+    op: Literal["read", "write", "vectorSearch", "hybridSearch", "changeStream", "graphLookup"] | None = None
     filter: dict[str, Any] | None = None
     result: Any = None
     reason: str | None = None
@@ -64,3 +64,11 @@ class ChatResponse(BaseModel):
     timeline: list[TimelineEvent]
     usage: dict[str, int]
     suggestions: list[Suggestion] = []
+
+
+class ReviewResolution(BaseModel):
+    """Resolução de um caso escalado. `decision` é fechada: o analista escolhe entre encaminhamentos
+    conhecidos, não digita uma ação livre que ninguém depois consegue agregar."""
+    decision: Literal["quality_analysis", "approve_replacement", "refund", "reject"]
+    resolved_by: str = Field(min_length=2, max_length=80)
+    note: str = Field(default="", max_length=2000)

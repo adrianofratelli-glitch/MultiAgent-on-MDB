@@ -11,7 +11,12 @@ from .guidance import customer_snapshot, format_options, no_data_reply
 from .memory import active_facts
 from .models import TimelineEvent
 from .policies import public_document, safe_invoice_filter, safe_order_read_filter, safe_order_update, safe_shipment_filter
-from .retrieval import reciprocal_rank_fusion
+from .decisions import build_decision_doc, record_decision
+from .replacement import apply_replacement, assess_replacement, block_for_quality_review
+from .graph import (build_order_chain_pipeline, summarize_order_chain,
+                     traverse_order_chain_in_memory)
+from .retrieval import (build_kb_lexical_pipeline, build_kb_rank_fusion_pipeline,
+                        build_kb_vector_pipeline, reciprocal_rank_fusion)
 from .router import CATEGORY_KEYWORDS, normalize
 
 
@@ -116,6 +121,49 @@ async def run_order_agent(store: DataStore, message: str, customer: dict, llm=No
         response = no_data_reply("order", snapshot, identifier=explicit_order_id)
         event = TimelineEvent(category="agent", title="Consulta segura de pedido (sem resultado — orientação com os pedidos reais)", agent="order_agent", collection="orders", op="read", filter=query, result=[], duration_ms=(perf_counter() - started) * 1000)
         return AgentResult(response, event)
+    if requested_status == "troca_solicitada":
+        # A troca é uma operação de domínio, não um `$set` qualquer: `apply_replacement`
+        # consulta a cadeia de reposições, decide, e só então escreve — tudo num lugar só.
+        # `troca_solicitada` nem sequer é alcançável por `safe_order_update` (ver
+        # policies.GUARDED_STATUSES), então nenhum caminho novo escreve isso por engano.
+        outcome = await apply_replacement(
+            store, clean, customer_key=customer["customer_key"], agent="order_agent",
+            conversation_id=(context or {}).get("conversation_id", ""))
+        chain = outcome.chain
+        if outcome.blocked_by_recurrence:
+            response = (
+                f"O pedido {clean['order_id']} de {clean['product']} já passou por "
+                f"{chain['replacements']} reposições ({' → '.join(chain['path'])}), sempre pelo mesmo "
+                "produto. Isso indica defeito de lote, e não uso indevido — por isso não vou "
+                "processar mais uma troca automática, que tenderia a repetir o problema."
+            )
+            if outcome.review:
+                response += (f" Abri a análise de qualidade **{outcome.review['review_id']}** e um "
+                             "especialista humano decide o encaminhamento.")
+            return AgentResult(response, outcome.events[0], extra_events=outcome.events[1:])
+
+        clean["status"] = "troca_solicitada"
+        response = (f"O pedido {clean['order_id']} de {clean['product']} foi atualizado para "
+                    "**troca_solicitada**." if outcome.changed else
+                    f"O pedido {clean['order_id']} de {clean['product']} já está com status "
+                    "**troca_solicitada**.")
+        event = outcome.events[-1] if outcome.changed else outcome.events[0]
+        extra = [item for item in outcome.events if item is not event]
+        if (context or {}).get("returning_from") == "logistics_agent":
+            response = (
+                f"Confirmação final: o pedido {clean['order_id']} de {clean['product']} permanece "
+                f"com status **{clean['status']}** após a consulta logística."
+            )
+            event.title = "Confirmação final do pedido após logística"
+            return AgentResult(response, event, extra_events=extra)
+        wants_billing_check = any(term in normalize(message) for term in ("fatura", "cobranca", "cobrança", "desconto"))
+        wants_logistics_check = any(term in normalize(message) for term in ("rastreio", "transportadora", "entrega", "rastreamento"))
+        if wants_billing_check:
+            return AgentResult(response, event, "billing_agent", "cliente quer saber o impacto da troca/reembolso na fatura", extra_events=extra)
+        if wants_logistics_check:
+            return AgentResult(response, event, "logistics_agent", "cliente quer saber o rastreio/transportadora após a troca", extra_events=extra)
+        return AgentResult(response, event, extra_events=extra)
+
     if requested_status:
         # segue valendo mesmo se o pedido JÁ estava nesse status (ex.: cliente repete "quero trocar" numa
         # conversa nova) — o cliente ainda pode estar perguntando o próximo passo (fatura/entrega), então o
@@ -123,7 +171,19 @@ async def run_order_agent(store: DataStore, message: str, customer: dict, llm=No
         changed = requested_status != clean["status"]
         if changed:
             write_query, update = safe_order_update({"order_id": clean["order_id"], "status": requested_status}, customer["customer_key"])
-            await store.update_one("orders", write_query, update)
+            previous_status = clean["status"]
+            # Mudança de status e registro da decisão numa transação só: se o registro
+            # falhar, o pedido volta ao status anterior. Mundo alterado sem trilha era
+            # justamente o furo que a trilha existe para impedir.
+            async with store.transaction() as tx:
+                await store.update_one("orders", write_query, update, session=tx)
+                await record_decision(store, build_decision_doc(
+                    action="order_status_change", subject_id=clean["order_id"],
+                    customer_key=customer["customer_key"], agent="order_agent",
+                    conversation_id=(context or {}).get("conversation_id", ""),
+                    reasoning=f"Cliente pediu explicitamente a mudança para '{requested_status}'.",
+                    payload={"from": previous_status, "to": requested_status, "product": clean["product"]},
+                ), session=tx)
             clean["status"] = requested_status
             response = f"O pedido {clean['order_id']} de {clean['product']} foi atualizado para **{requested_status}**."
             title = "Atualização segura de status do pedido"
@@ -185,6 +245,33 @@ async def run_billing_agent(store: DataStore, message: str, customer: dict, llm=
     return AgentResult(synthesized or response, event)
 
 
+# Um cliente perguntando "ainda tem garantia?" não pediu nada: escalar aí cria trabalho de
+# analista a partir de uma leitura. A revisão humana só abre quando ele relata uma falha nova
+# ou pede a reposição — a consulta da cadeia continua acontecendo nos dois casos, e informando.
+REPLACEMENT_INTENT_TERMS = (
+    "troca", "trocar", "trocado", "substituir", "substituicao", "substituição",
+    "quebrou", "parou", "defeito", "com problema", "de novo", "novamente",
+    "outra vez", "nao funciona", "não funciona", "reembolso", "devolver",
+)
+
+
+def wants_replacement(message: str) -> bool:
+    normalized = normalize(message)
+    return any(term in normalized for term in REPLACEMENT_INTENT_TERMS)
+
+
+async def order_replacement_chain(store: DataStore, order_id: str, customer_key: str) -> dict:
+    """Cadeia de trocas do pedido, via $graphLookup no Atlas (loop em Python só em DEMO_MODE)."""
+    if not store.memory:
+        try:
+            rows = await store.aggregate("orders", build_order_chain_pipeline(order_id, customer_key))
+            return summarize_order_chain(rows[0] if rows else None)
+        except Exception:
+            pass
+    orders = await store.find_many("orders", {"owner_customer_key": customer_key}, limit=200)
+    return summarize_order_chain(traverse_order_chain_in_memory(orders, order_id, customer_key))
+
+
 async def run_warranty_agent(store: DataStore, message: str, customer: dict, llm=None, budget=None, agent_doc=None, scope_hint: str = "", context: dict | None = None) -> AgentResult:
     started = perf_counter()
     explicit_order_id = extract_id(message, "PED")
@@ -215,19 +302,62 @@ async def run_warranty_agent(store: DataStore, message: str, customer: dict, llm
         expires_at = expiry_date.strftime("%Y-%m-%d")
         covered = utcnow().replace(tzinfo=None) <= expiry_date
     doc = {"order_id": clean["order_id"], "product": clean["product"], "category": category, "warranty_months": months, "purchased_at": purchased_at, "expires_at": expires_at, "covered": covered}
+
+    # Travessia de grafo: a garantia deste pedido depende de quantas vezes ele já foi reposto.
+    # Leitura pura — este agente EXPLICA a cobertura, quem efetiva a troca é o order_agent.
+    chain, graph_event = await assess_replacement(
+        store, clean["order_id"], customer["customer_key"], agent="warranty_agent")
+    doc["replacement_chain"] = chain
+
     response = (
         f"O pedido {clean['order_id']} ({clean['product']}) tem garantia de {months} meses, válida até **{expires_at}** — "
         f"{'dentro do prazo' if covered else 'fora do prazo'} de cobertura." if expires_at else
         "Não consegui calcular a garantia por falta de data de compra no registro."
     )
-    trivial = _is_trivial_lookup(message, order_id)
-    synthesized = None if trivial else await llm_synthesize(llm, agent_doc, budget, message, doc, "O cliente pode perguntar qualquer coisa sobre a cobertura de garantia deste pedido — responda com base no documento acima, nunca invente prazo diferente do calculado." + scope_hint)
+    # Gate: a terceira falha do MESMO produto não é mais uma troca — é análise de qualidade.
+    # O agente PARA aqui em vez de prometer uma reposição que já falhou três vezes. Só que
+    # ele só para quando há de fato um pedido de ação: ver `wants_replacement`.
+    review = None
+    if chain["needs_quality_review"] and wants_replacement(message):
+        review = await block_for_quality_review(
+            store, chain, agent="warranty_agent", customer_key=customer["customer_key"],
+            conversation_id=(context or {}).get("conversation_id", ""))
+
+    chain_note = ""
+    if chain["replacements"]:
+        chain_note = (
+            f" Este pedido já passou por {chain['replacements']} reposição(ões): "
+            f"{' → '.join(chain['path'])}."
+        )
+    if chain["recurring_defect"]:
+        chain_note += (
+            f" Como o mesmo produto ({chain['product']}) já exigiu {chain['replacements']} reposições, "
+            "isso indica defeito de lote e não uso indevido — trocar de novo tende a repetir o problema."
+        )
+    if review:
+        chain_note += (
+            f" Abri a análise de qualidade **{review['review_id']}** e um especialista humano "
+            "decide o encaminhamento — eu não processo mais uma troca automática deste item."
+        )
+    response += chain_note
+
+    trivial = _is_trivial_lookup(message, order_id) and not chain["replacements"]
+    synthesized = None if trivial else await llm_synthesize(llm, agent_doc, budget, message, doc, "O cliente pode perguntar qualquer coisa sobre a cobertura de garantia deste pedido — responda com base no documento acima, nunca invente prazo diferente do calculado. Se `replacement_chain.recurring_defect` for verdadeiro, diga explicitamente que o mesmo produto já falhou repetidas vezes e que o caso vai para análise de qualidade, em vez de prometer mais uma troca." + scope_hint)
     title = "Consulta de garantia" + (" (resposta sintetizada pelo modelo)" if synthesized else " (modo econômico, sem chamada ao modelo)" if trivial else "")
     event = TimelineEvent(category="agent", title=title, agent="warranty_agent", collection="warranty_policies", op="read", filter={"category": category}, result=doc, duration_ms=(perf_counter() - started) * 1000)
     wants_alternative = any(term in normalize(message) for term in ("parecido", "parecida", "similar", "mais barato", "mais barata", "recomenda", "substituto"))
+    tail_events = [graph_event]
+    if review:
+        tail_events.append(TimelineEvent(
+            category="agent", title="Escalonamento pausável: caso aguarda decisão humana",
+            agent="warranty_agent", collection="pending_reviews", op="write",
+            filter={"subject_id": clean["order_id"], "status": "pending"},
+            result={"review_id": review["review_id"], "recommended_action": review["recommended_action"],
+                    "risk_factors": review["risk_factors"]},
+            reason=review["reasoning"]))
     if wants_alternative:
-        return AgentResult(synthesized or response, event, "product_agent", "cliente pediu produto alternativo após consulta de garantia")
-    return AgentResult(synthesized or response, event)
+        return AgentResult(synthesized or response, event, "product_agent", "cliente pediu produto alternativo após consulta de garantia", extra_events=tail_events)
+    return AgentResult(synthesized or response, event, extra_events=tail_events)
 
 
 REWARD_CATALOG = {
@@ -281,11 +411,29 @@ async def run_loyalty_agent(store: DataStore, message: str, customer: dict, llm=
                            if acessiveis else " Assim que o saldo subir, eu processo o resgate na hora.")
             response = (f"Você tem {clean['points']} pontos e {label} custa {cost} — faltam {faltam} pontos."
                         + alternativa)
+            await record_decision(store, build_decision_doc(
+                action="loyalty_redemption_denied", subject_id=customer["customer_key"],
+                customer_key=customer["customer_key"], agent="loyalty_agent",
+                conversation_id=(context or {}).get("conversation_id", ""),
+                reasoning=f"Saldo de {clean['points']} pontos é insuficiente para '{label}' ({cost} pontos).",
+                risk_factors=["saldo_insuficiente"],
+                payload={"reward": label, "cost": cost, "balance": clean["points"]},
+            ), severity="warning")
             event = TimelineEvent(category="agent", title="Resgate de fidelidade negado (saldo insuficiente)", agent="loyalty_agent", collection="loyalty_accounts", op="read", filter=query, result=clean, duration_ms=(perf_counter() - started) * 1000)
             return AgentResult(response, event)
-        await store.update_one("loyalty_accounts", query, {"$inc": {"points": -cost}})
         redemption = {"redemption_id": f"RDM-{customer['customer_key'].upper()}-{int(started)}", "customer_key": customer["customer_key"], "reward": label, "points_spent": cost, "status": "confirmado", "at": utcnow()}
-        await store.insert_one("redemptions", redemption)
+        # Três escritas, uma transação: débito dos pontos, comprovante e decisão. É a mais
+        # crítica das quatro — um débito sem comprovante é saldo que sumiu sem explicação.
+        async with store.transaction() as tx:
+            await store.update_one("loyalty_accounts", query, {"$inc": {"points": -cost}}, session=tx)
+            await store.insert_one("redemptions", redemption, session=tx)
+            await record_decision(store, build_decision_doc(
+                action="loyalty_redemption", subject_id=redemption["redemption_id"],
+                customer_key=customer["customer_key"], agent="loyalty_agent",
+                conversation_id=(context or {}).get("conversation_id", ""),
+                reasoning=f"Saldo de {clean['points']} pontos cobre o custo de {cost} de '{label}'.",
+                payload={"reward": label, "points_spent": cost, "balance_after": clean["points"] - cost},
+            ), session=tx)
         response = f"Resgate confirmado: **{label}**, {cost} pontos debitados. Saldo restante: {clean['points'] - cost} pontos."
         event = TimelineEvent(category="agent", title="Resgate de fidelidade confirmado", agent="loyalty_agent", collection="redemptions", op="write", filter=query, result=redemption, duration_ms=(perf_counter() - started) * 1000)
         return AgentResult(response, event)
@@ -338,7 +486,15 @@ async def run_logistics_agent(store: DataStore, message: str, customer: dict, ll
     if wants_reschedule and clean["current_location"] != "Entregue":
         # escrita restrita: só um campo de sinalização, nunca a transportadora/prazo real — quem confirma
         # a nova data é a transportadora, o sistema só registra o pedido de reagendamento.
-        await store.update_one("shipments", query, {"$set": {"reschedule_requested": True}})
+        async with store.transaction() as tx:
+            await store.update_one("shipments", query, {"$set": {"reschedule_requested": True}}, session=tx)
+            await record_decision(store, build_decision_doc(
+                action="shipment_reschedule", subject_id=clean.get("order_id", ""),
+                customer_key=customer["customer_key"], agent="logistics_agent",
+                conversation_id=(context or {}).get("conversation_id", ""),
+                reasoning="Cliente pediu reagendamento da entrega.",
+                payload={"carrier": clean.get("carrier"), "tracking_code": clean.get("tracking_code")},
+            ), session=tx)
         response = f"Reagendamento solicitado para o pedido {clean['order_id']}. A transportadora **{clean['carrier']}** vai confirmar uma nova janela de entrega em até 24h."
         event = TimelineEvent(category="agent", title="Reagendamento de entrega solicitado", agent="logistics_agent", collection="shipments", op="write", filter=query, result={**clean, "reschedule_requested": True}, duration_ms=(perf_counter() - started) * 1000)
         if wants_final_order_confirmation and order_already_ran:
@@ -503,29 +659,41 @@ async def run_product_agent(store: DataStore, message: str, customer: dict, llm=
     return AgentResult(final_response, event, extra_events=events[1:])
 
 
-async def search_kb(store: DataStore, message: str) -> list[dict]:
+async def search_kb(store: DataStore, message: str) -> tuple[list[dict], str]:
+    """Devolve (artigos, estratégia). A estratégia vira o título do evento de timeline —
+    a demo mostra explicitamente se a fusão rodou no servidor ou na aplicação."""
     if not store.memory:
-        vector_pipeline = [{"$vectorSearch": {"index": "kb_autoembed_v1", "path": "content", "query": {"text": message}, "model": "voyage-4", "numCandidates": 50, "limit": 10}}, {"$project": {"article_id": 1, "title": 1, "content": 1, "category": 1}}]
-        lexical_pipeline = [{"$search": {"index": "kb_lexical_v1", "compound": {"should": [{"text": {"query": message, "path": "title", "score": {"boost": {"value": 2}}}}, {"text": {"query": message, "path": "content"}}], "minimumShouldMatch": 1}}}, {"$limit": 10}, {"$project": {"article_id": 1, "title": 1, "content": 1, "category": 1}}]
+        try:
+            # Caminho preferido: $rankFusion funde vetorial + BM25 dentro do MongoDB (8.1+).
+            articles = await store.aggregate("kb_articles", build_kb_rank_fusion_pipeline(message, limit=4))
+            if articles:
+                return articles, "rankFusion"
+        except Exception:
+            # Servidor sem $rankFusion (ou índice indisponível): cai para as duas pernas
+            # separadas + RRF na aplicação, que é o comportamento anterior.
+            pass
         try:
             async def execute(pipeline: list[dict]) -> list[dict]:
                 cursor = await store._collection("kb_articles").aggregate(pipeline)
                 return await cursor.to_list(None)
-            vector, lexical = await asyncio.gather(execute(vector_pipeline), execute(lexical_pipeline))
+            vector, lexical = await asyncio.gather(
+                execute(build_kb_vector_pipeline(message, limit=10)),
+                execute(build_kb_lexical_pipeline(message, limit=10)),
+            )
             for item in vector + lexical:
                 item["_id"] = item.get("article_id")
-            return reciprocal_rank_fusion([vector, lexical], limit=4)
+            return reciprocal_rank_fusion([vector, lexical], limit=4), "rrf_aplicacao"
         except Exception:
             pass
     articles = await store.find_many("kb_articles", {}, limit=100)
     lexical = _local_rank(articles, message, ("title", "content"))
     semantic = _local_rank(articles, message, ("category", "title"))
-    return reciprocal_rank_fusion([lexical, semantic], limit=4)
+    return reciprocal_rank_fusion([lexical, semantic], limit=4), "rrf_local"
 
 
 async def run_support_agent(store: DataStore, message: str, customer: dict, llm=None, budget=None, agent_doc=None, scope_hint: str = "", context: dict | None = None) -> AgentResult:
     started = perf_counter()
-    articles = await search_kb(store, message)
+    articles, retrieval_strategy = await search_kb(store, message)
     clean = [public_document(item) for item in articles]
     evidence = clean[0] if clean else None
     response = (
@@ -544,7 +712,7 @@ async def run_support_agent(store: DataStore, message: str, customer: dict, llm=
         "Se nenhum artigo cobrir o problema relatado, diga que vai escalar/orientar de forma genérica em vez de inventar um passo a passo."
     )
     synthesized = await llm_synthesize(llm, agent_doc, budget, message, clean, handoff_note)
-    event = TimelineEvent(category="agent", title="RAG híbrido com RRF" + (" + modelo" if synthesized else ""), agent="support_agent", collection="kb_articles", op="hybridSearch", filter={"query": message}, result=clean[:3], duration_ms=(perf_counter() - started) * 1000)
+    event = TimelineEvent(category="agent", title=("RAG híbrido: $rankFusion server-side" if retrieval_strategy == "rankFusion" else "RAG híbrido com RRF na aplicação") + (" + modelo" if synthesized else ""), agent="support_agent", collection="kb_articles", op="hybridSearch", filter={"query": message, "strategy": retrieval_strategy}, result=clean[:3], duration_ms=(perf_counter() - started) * 1000)
     final_response = synthesized or response
     extra_events: list[TimelineEvent] = []
 
@@ -553,7 +721,15 @@ async def run_support_agent(store: DataStore, message: str, customer: dict, llm=
         # KB sem evidência confiável (ou pedido explícito de escalonar): abre chamado real em vez de deixar
         # o cliente sem próximo passo — mais uma ação de escrita além do write único do order_agent.
         ticket = {"ticket_id": f"TCK-{customer['customer_key'].upper()}-{int(started * 1000) % 100000}", "customer_key": customer["customer_key"], "area": customer["area"], "subject": message[:200], "status": "aberto", "created_at": utcnow()}
-        await store.insert_one("support_tickets", ticket)
+        async with store.transaction() as tx:
+            await store.insert_one("support_tickets", ticket, session=tx)
+            await record_decision(store, build_decision_doc(
+                action="support_ticket_open", subject_id=ticket["ticket_id"],
+                customer_key=customer["customer_key"], agent="support_agent",
+                conversation_id=(context or {}).get("conversation_id", ""),
+                reasoning="Cliente pediu explicitamente atendimento humano.",
+                payload={"subject": ticket["subject"], "area": ticket["area"]},
+            ), severity="warning", session=tx)
         final_response += f"\n\nAbri o chamado **{ticket['ticket_id']}** para acompanhamento humano — nosso time entra em contato em até 24h."
         extra_events.append(TimelineEvent(category="agent", title="Chamado de suporte aberto", agent="support_agent", collection="support_tickets", op="write", result=ticket))
 
