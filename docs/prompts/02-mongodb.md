@@ -8,13 +8,15 @@
 
 ## Inventário de operadores — o que esta PoV usa contra o Atlas
 
-Auditado no código em 2026-08-18, não de memória:
+Auditado no código em 2026-08-24, não de memória:
 
 | Operador | Ocorrências | Onde |
 |---|---|---|
 | `$vectorSearch` | 15 | cascata de cache (2 níveis), guardrail semântico, memória longa, catálogo, KB |
 | `$unionWith` | 3 | a cascata: curto prazo ∪ cache numa consulta só |
-| `$search` (BM25) | 1 | perna lexical do híbrido de KB (`kb_lexical_v1`) |
+| `$search` (BM25) | 1 | perna lexical do híbrido de KB (`kb_lexical_v1`), hoje dentro do `$rankFusion` |
+| `$rankFusion` | 1 | fusão híbrida server-side de `kb_articles` (`retrieval.py:build_kb_rank_fusion_pipeline`) |
+| `$graphLookup` | 1 | cadeia de trocas de pedido (`graph.py:build_order_chain_pipeline`) |
 | `$addFields` + `$multiply`/`$divide`/`$min` | — | ranking ponderado do catálogo, dentro da agregação |
 | **`$regex` em query** | **0** | — |
 
@@ -502,3 +504,92 @@ O `seed.py` é **idempotente** — `replace_one(..., upsert=True)` por chave nat
 Isso não é uso fabricado: o primeiro turno real já aconteceu no warmup, então o clique ao vivo é um `cache_hit: true` genuíno reproduzindo a timeline armazenada. O TTL de 24h existe pra sobreviver da preparação até a reunião com folga.
 
 O `eval.py` roda os mesmos cenários como golden dataset e checa, por caso: bloqueado ou não, `route_source`, **a sequência exata de agentes** (deduplicada por adjacência), quantos handoffs, qual collection foi escrita e se teve revisita. Grava tudo em `eval_runs` com `pass_rate` e sai com código != 0 se algum caso falhar. Métrica de qualidade morando no mesmo banco do resto é consultável como qualquer outro dado operacional.
+
+
+---
+
+## `$graphLookup` — cadeia de trocas
+
+Um pedido trocado gera um pedido de reposição, ligado ao anterior por `replacement_order_id`.
+"Este item já foi reposto quantas vezes, e sempre pelo mesmo produto?" não se responde documento
+a documento: o número de saltos não é conhecido de antemão. Em Python seria um `find` por salto;
+`$graphLookup` faz o loop dentro do servidor, em uma agregação.
+
+```python
+{"$graphLookup": {
+    "from": "orders",
+    "startWith": "$replacement_order_id",
+    "connectFromField": "replacement_order_id",
+    "connectToField": "order_id",
+    "as": "chain",
+    "maxDepth": 6,
+    "depthField": "depth",
+    "restrictSearchWithMatch": {"owner_customer_key": customer_key},
+}}
+```
+
+Dois pontos que não são opcionais:
+
+- **Isolamento nos dois lugares.** `owner_customer_key` no `$match` inicial garante que a
+  travessia parte de um pedido do próprio cliente; `restrictSearchWithMatch` repete o filtro a
+  cada salto. Sem o segundo, um `replacement_order_id` mal preenchido alcança pedido alheio.
+- **Índice em `connectToField`.** Cada salto casa `replacement_order_id → order_id`; sem índice
+  a travessia vira collection scan por salto. `orders` tem o índice único em `order_id` mais o
+  composto `(owner_customer_key, replacement_order_id)`.
+
+O sinal de negócio sai de `summarize_order_chain`, aritmética pura sobre o array — três ou mais
+unidades do mesmo produto na cadeia é defeito de lote, e é o que dispara o escalonamento pausável.
+
+## `$rankFusion` — híbrido server-side
+
+`kb_articles` funde a perna vetorial (`kb_autoembed_v1`, autoEmbed voyage-4) e a lexical
+(`kb_lexical_v1`, BM25 com boost no título) **dentro do banco**. Cada perna ranqueia mais fundo
+que o limite final (`max(k*4, 20)`) para a fusão ter o que reordenar; as sub-pipelines entram sem
+`$project`, e quem projeta é o estágio final, com `rrf_score: {"$meta": "score"}`.
+
+Exige MongoDB 8.1+. O fallback (duas agregações + `reciprocal_rank_fusion` em Python) continua no
+código e é o caminho de `DEMO_MODE`/CI — `search_kb` devolve qual dos dois rodou, e a UI mostra.
+
+## `agent_decisions` / `agent_audit_events` / `pending_reviews`
+
+| Collection | Papel | TTL |
+|---|---|---|
+| `agent_traces`, `agent_handoffs` | observabilidade, timeline da UI | 30 dias |
+| `agent_decisions` | registro imutável de toda ação com efeito no mundo | **nenhum** |
+| `agent_audit_events` | trilha append-only referenciando `decision_id` | **nenhum** |
+| `pending_reviews` | fila de casos pausados aguardando humano (mutável, é fila) | **nenhum** |
+
+`agent_decisions` nunca sofre `update_one`. Uma correção é um documento novo com `supersedes`
+apontando para o anterior — é o que preserva a recomendação original do agente ao lado da decisão
+humana, e o que torna a taxa de override mensurável. Os três têm validador `$jsonSchema`
+(`decision_id` casa `^DEC-[0-9A-F]{12}$`, `decided_by` é enum `agent|human`, `severity` é enum).
+
+
+## Transação multi-documento
+
+`DataStore.transaction()` envolve a escrita de negócio e o registro de conformidade. As
+collections envolvidas precisam viver no **mesmo banco** — vale para `orders`,
+`loyalty_accounts`, `shipments`, `support_tickets`, `pending_reviews`, `agent_decisions` e
+`agent_audit_events`; o banco `multiagent_brain` (configuração) fica de fora e não participa
+de escrita transacional.
+
+Quatro pontos usam:
+
+| Onde | O que entra na transação |
+|---|---|
+| `replacement.apply_replacement` | `orders.status` → `troca_solicitada` + decisão (único caminho) |
+| `order_agent` (demais status) | `orders.status` + decisão |
+| `loyalty_agent` | `$inc` nos pontos + `redemptions` + decisão — a mais crítica: débito sem comprovante é saldo que sumiu |
+| `logistics_agent` | `shipments.reschedule_requested` + decisão |
+| `support_agent` | `support_tickets` + decisão |
+| `reviews.open_review` | `pending_reviews` + decisão de escalonamento |
+| `reviews.resolve_review` | fecha a revisão + decisão humana + evento + handoff de volta |
+
+Exige replica set (todo Atlas é). `connect()` detecta via `hello` (`setName`, ou `msg:
+"isdbgrid"` num cluster shardeado) e avisa no log quando não há suporte; ali as escritas
+continuam acontecendo, sequenciais e sem atomicidade.
+
+**Conflito é para repetir, não para falhar.** Duas transações no mesmo documento produzem
+`WriteConflict` com o label `TransientTransactionError`. `is_transient_transaction_error()`
+testa pelo label e não pelo código — é o contrato que o driver garante, e cobre eleição de
+primário e timeout de commit de graça.

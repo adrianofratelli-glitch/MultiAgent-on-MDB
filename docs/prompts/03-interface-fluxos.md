@@ -3,6 +3,21 @@
 > Terceiro dos três prompts. A tela, os cenários versionados e a demo.
 
 ---
+## Contrato visual do portfólio (v2)
+
+Esta UI participa da assinatura MongoDB Dark das PoVs. O arquivo
+`src/pov-signature.css` é uma cópia sincronizada entre os dez frontends e deve
+ser importado **depois** do stylesheet local. O contêiner raiz carrega
+`data-pov-shell`, existe um `.pov-skip-link` para `#conteudo-principal` e o
+`index.html` declara pt-BR, dark color scheme, theme color e o favicon comum.
+
+A camada compartilhada é dona da document rail, foco, touch targets e redução de
+movimento. Este arquivo continua dono do fluxo e das exceções de domínio: não
+achate uma tela operacional num template de landing page e não remova a tese
+visual específica desta PoV. Qualquer mudança na assinatura precisa ser
+replicada nas dez cópias e validada em 1440, 768 e 360 px, além do build de
+produção e do estado offline.
+
 
 ## Stack, e por que ela é pequena
 
@@ -12,7 +27,7 @@ Isso é deliberado. Numa PoV que já carrega oito agentes, Atlas, change stream 
 
 São quatro arquivos além do `App.jsx`: `api.js` e três componentes.
 
-## As quatro abas
+## As cinco abas
 
 Cada uma responde uma pergunta que sempre aparece:
 
@@ -20,6 +35,7 @@ Cada uma responde uma pergunta que sempre aparece:
 | --- | --- |
 | **Chat** | Funciona? É o palco: conversa, raio-x do turno e inspetores lado a lado |
 | **Agentes** | Quem são os oito? Registry vindo do Atlas, editável em modo admin |
+| **Decisões** | Quem decidiu, e com base em quê? Fila de casos pausados + trilha imutável |
 | **Guardrails** | E se alguém tentar burlar? |
 | **Métricas** | Está coberto? Cobertura, coordenação, escritas e as rodadas de avaliação |
 
@@ -31,14 +47,24 @@ Essa ordem não é estética, é a ordem em que eu narro a demo:
 
 1. **Hero** com o `conversation_id` do turno e o agente ativo, mais um botão "+ nova conversa" que limpa o estado local (inclusive métricas e feed ao vivo).
 2. **Esteira de agentes** (`agent-cast`) — quem atuou, na ordem, deduplicado por adjacência. Entre eles, "chamou →" com o motivo do handoff no `title`; num turno de fan-out vira "+ (paralelo)" e o rótulo muda pra "despacho paralelo". Essa faixa é a coisa que o cliente entende em dois segundos.
-3. **Coleções em ação neste turno** — chip por collection com badge de operação (`leitura`, `escrita`, `$vectorSearch`, `BM25 + vetor (RRF)`, `change stream`), cada badge com tooltip de qual agente e qual evento.
-4. **Barra de estatísticas** — agentes ativos, handoffs no turno, origem da rota, tokens estimados.
-5. **Feed ao vivo** — o último handoff vindo do Change Stream. Só o último, de propósito: lista crescendo sozinha durante a fala distrai mais do que prova.
-6. **`AiBrainHighlights`** — quatro cartões de governança: identidade e isolamento; cascata (HIT com fonte e tokens economizados, ou MISS com tokens gastos); guardrail (aprovado com score, ou bloqueado); e memória (quantos itens de longo prazo, se teve fato novo).
-7. **Workspace em três colunas** — `ChatPanel` | `Timeline` | `Inspector`.
-8. **`AiBrainInspector`** — abas por collection (`semantic_cache`, `short_term_memory`, `long_term_memory`, `customer_memory`) mostrando os documentos crus da identidade logada, com scope, TTL e marcação de supersessão.
+3. **Coleções em ação neste turno** — chip por collection com badge de operação (`leitura`, `escrita`, `$vectorSearch`, `híbrido BM25 + vetor`, `change stream`, `$graphLookup`), cada badge com tooltip de qual agente e qual evento. O rótulo do híbrido deixou de citar "RRF" porque a fusão agora roda server-side com `$rankFusion`; qual dos dois caminhos rodou está no título do evento na `Timeline`, não no badge.
+4. **Cadeia de trocas** (`ReplacementChain`) — só aparece quando a travessia de grafo rodou no turno. Lê o evento com `op: "graphLookup"` e desenha a corrente `PED-3001 → PED-3011 → PED-3021 → PED-3031`, três contadores (reposições, unidades do mesmo produto, produtos distintos) e um veredito. É o painel que explica visualmente por que a resposta mudou: nenhum documento sozinho diz "é a quarta vez". O rodapé diz quantas idas ao banco a agregação substituiu — é a frase que se usa contra "isso eu faço com um loop".
+5. **Barra de estatísticas** — agentes ativos, handoffs no turno, origem da rota, tokens estimados.
+6. **Feed ao vivo** — o último handoff vindo do Change Stream. Só o último, de propósito: lista crescendo sozinha durante a fala distrai mais do que prova.
+7. **`AiBrainHighlights`** — quatro cartões de governança: identidade e isolamento; cascata (HIT com fonte e tokens economizados, ou MISS com tokens gastos); guardrail (aprovado com score, ou bloqueado); e memória (quantos itens de longo prazo, se teve fato novo).
+8. **Workspace em três colunas** — `ChatPanel` | `Timeline` | `Inspector`.
+9. **`AiBrainInspector`** — abas por collection (`semantic_cache`, `short_term_memory`, `long_term_memory`, `customer_memory`) mostrando os documentos crus da identidade logada, com scope, TTL e marcação de supersessão.
 
 A `Timeline` renderiza cada evento com número, badge de categoria (`agente`/`memória`/`guardrail`/`cache`/`coordenação`/`paralelo`), agente, duração em ms, collection tocada, motivo do handoff entre aspas, e dois `<details>` — filtro/consulta e resultado. O de handoff abre por padrão; o resto fica fechado pra não virar parede de JSON.
+
+## A aba Decisões
+
+Duas metades, e a ordem importa: primeiro o que exige ação humana, depois o histórico.
+
+1. **Fila do analista** (`pending_reviews`) — exige modo admin, e diz isso quando não está ligado em vez de mostrar uma lista vazia sem explicação. Cada caso traz o motivo entre aspas, a evidência do `$graphLookup` (o caminho da cadeia), as tags de risco, e quatro botões de encaminhamento. O botão que o agente recomendou vem marcado em verde — o analista vê a recomendação sem ela ser imposta. Acima da lista, três números: casos resolvidos, quantas vezes o humano discordou, e a taxa de override.
+2. **Trilha de decisões** (`agent_decisions` + `agent_audit_events`) — cartões com borda verde para decisão do agente e azul para decisão humana. Quando o humano decidiu diferente, um bloco destacado mostra as duas coisas lado a lado: o que ele decidiu e o que o agente havia recomendado. Embaixo, a trilha append-only com severidade.
+
+O estado vazio da fila não é um vazio mudo: ele diz qual identidade e qual pedido disparam o gate (`carla` / `PED-3001`), para a demo nunca ficar presa numa tela em branco.
 
 ## Contrato com o backend
 
