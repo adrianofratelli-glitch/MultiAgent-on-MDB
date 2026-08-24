@@ -39,6 +39,15 @@ export const api = {
   chat: (message, conversationId) => request('/api/chat', { method: 'POST', body: JSON.stringify({ message, conversation_id: conversationId || null }) }),
   updateAgent: (key, update) => request(`/api/admin/agents/${key}`, { method: 'PATCH', headers: { 'X-Admin-Key': import.meta.env.VITE_ADMIN_KEY || '' }, body: JSON.stringify(update) }),
   evalRuns: () => request('/api/eval/runs', { headers: { 'X-Admin-Key': import.meta.env.VITE_ADMIN_KEY || '' } }),
+  // Trilha de conformidade do próprio chamador: a customer_key vem do JWT, nunca daqui.
+  decisions: (subjectId) => request('/api/decisions' + (subjectId ? `?subject_id=${encodeURIComponent(subjectId)}` : '')),
+  myReviews: (status = 'pending') => request(`/api/reviews?status=${encodeURIComponent(status)}`),
+  adminReviews: (status = 'pending') => request(`/api/admin/reviews?status=${encodeURIComponent(status)}`, { headers: { 'X-Admin-Key': import.meta.env.VITE_ADMIN_KEY || '' } }),
+  resolveReview: (reviewId, body) => request(`/api/admin/reviews/${encodeURIComponent(reviewId)}/resolve`, {
+    method: 'POST',
+    headers: { 'X-Admin-Key': import.meta.env.VITE_ADMIN_KEY || '' },
+    body: JSON.stringify(body),
+  }),
   async streamEvents(onEvent, signal, onOpen) {
     const response = await fetch(`${BASE}/api/events/stream`, { headers: { Authorization: `Bearer ${token}` }, signal });
     if (!response.ok) {

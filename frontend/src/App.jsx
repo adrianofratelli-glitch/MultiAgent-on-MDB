@@ -3,9 +3,13 @@ import { api } from './api.js';
 import AiBrainInspector, { AiBrainHighlights } from './components/AiBrainPanel.jsx';
 import Inspector from './components/Inspector.jsx';
 import Timeline from './components/Timeline.jsx';
+import ReplacementChain from './components/ReplacementChain.jsx';
+import CompliancePage from './components/CompliancePage.jsx';
 
-const NAV = ['Chat', 'Agentes', 'Guardrails', 'Métricas'];
-const OP_LABELS = { read: 'leitura', write: 'escrita', vectorSearch: '$vectorSearch', hybridSearch: 'BM25 + vetor (RRF)', changeStream: 'change stream' };
+const NAV = ['Chat', 'Agentes', 'Decisões', 'Guardrails', 'Métricas'];
+// O rótulo do híbrido não cita mais o RRF na aplicação: a fusão passou a rodar server-side
+// com $rankFusion, e o título do evento diz qual dos dois caminhos rodou de fato.
+const OP_LABELS = { read: 'leitura', write: 'escrita', vectorSearch: '$vectorSearch', hybridSearch: 'híbrido BM25 + vetor', changeStream: 'change stream', graphLookup: '$graphLookup' };
 const IDENTITIES = ['ana', 'bruno', 'carla', 'diego'];
 
 function ChatPanel({ messages, input, setInput, send, busy, customerName, demos, suggestions, onSuggestion }) {
@@ -119,14 +123,14 @@ function MetricsPage({ metrics, evalRuns, adminMode }) {
     .filter(([key]) => key.startsWith('collection.') && key.endsWith('.write') && businessCollections.has(key.slice('collection.'.length, -'.write'.length)))
     .reduce((sum, [, value]) => sum + value, 0);
   const nativeSearches = Object.entries(counters)
-    .filter(([key]) => key.startsWith('collection.') && (key.endsWith('.vectorSearch') || key.endsWith('.hybridSearch')))
+    .filter(([key]) => key.startsWith('collection.') && (key.endsWith('.vectorSearch') || key.endsWith('.hybridSearch') || key.endsWith('.graphLookup')))
     .reduce((sum, [, value]) => sum + value, 0);
   const collectionRows = Object.entries(counters).reduce((rows, [key, value]) => {
     if (!key.startsWith('collection.')) return rows;
     const parts = key.slice('collection.'.length).split('.');
     const op = parts.pop();
     const collection = parts.join('.');
-    const row = rows.get(collection) || { collection, read: 0, write: 0, vectorSearch: 0, hybridSearch: 0, changeStream: 0 };
+    const row = rows.get(collection) || { collection, read: 0, write: 0, vectorSearch: 0, hybridSearch: 0, changeStream: 0, graphLookup: 0 };
     row[op] = value;
     rows.set(collection, row);
     return rows;
@@ -136,7 +140,7 @@ function MetricsPage({ metrics, evalRuns, adminMode }) {
     ['agentes exercitados', `${specialistAgents}/7`, 'especialistas com atuação real'],
     ['handoffs', handoffCount, `${counters['coordination.revisits'] || 0} retornos controlados`],
     ['escritas de negócio', businessWrites, 'orders · tickets · resgates · entregas'],
-    ['buscas nativas', nativeSearches, 'Vector Search + híbrida RRF'],
+    ['operações nativas', nativeSearches, 'Vector Search · $rankFusion · $graphLookup'],
     ['latência p95', route.p95_ms ? `${Math.round(route.p95_ms)} ms` : '—', `${route.count || 0} amostras`],
     ['cache hit rate', cacheTotal ? `${Math.round((cacheHits / cacheTotal) * 100)}%` : '—', `${cacheHits} hits · ${cacheMisses} misses`],
     ['tokens economizados', (counters['tokens.economizados'] || 0).toLocaleString('pt-BR'), 'estimados, evitados por HIT na cascata'],
@@ -157,8 +161,8 @@ function MetricsPage({ metrics, evalRuns, adminMode }) {
         <div className="panel-label"><span>coleções em operação</span><code>collection.*</code></div>
         {collectionRows.size === 0
           ? <p className="metric-empty">Execute um cenário no Chat para materializar leituras, escritas e buscas.</p>
-          : <div className="metric-table-wrap"><table><thead><tr><th>collection</th><th>read</th><th>write</th><th>vector</th><th>hybrid</th></tr></thead><tbody>
-            {[...collectionRows.values()].sort((a, b) => a.collection.localeCompare(b.collection)).map((row) => <tr key={row.collection}><td><code>{row.collection}</code></td><td>{row.read}</td><td className={row.write ? 'hot' : ''}>{row.write}</td><td>{row.vectorSearch}</td><td>{row.hybridSearch}</td></tr>)}
+          : <div className="metric-table-wrap"><table><thead><tr><th>collection</th><th>read</th><th>write</th><th>vector</th><th>hybrid</th><th>graph</th></tr></thead><tbody>
+            {[...collectionRows.values()].sort((a, b) => a.collection.localeCompare(b.collection)).map((row) => <tr key={row.collection}><td><code>{row.collection}</code></td><td>{row.read}</td><td className={row.write ? 'hot' : ''}>{row.write}</td><td>{row.vectorSearch}</td><td>{row.hybridSearch}</td><td className={row.graphLookup ? 'hot' : ''}>{row.graphLookup}</td></tr>)}
           </tbody></table></div>}
       </div>
       <div className="eval-panel">
@@ -325,10 +329,11 @@ export default function App() {
   }, [timeline]);
 
   return (
-    <>
-      <nav className="top-nav"><div className="nav-inner"><button className="brand" onClick={() => setNav('Chat')}><span className="leaf">◆</span><span>MongoDB</span><b>Agent Control Plane</b></button><div className="nav-tabs">{NAV.map((item) => <button className={nav === item ? 'active' : ''} key={item} onClick={() => setNav(item)}>{item}</button>)}</div><label className="identity-select">identidade<select value={customer?.customer_key || 'ana'} onChange={(event) => switchIdentity(event.target.value)}>{IDENTITIES.map((key) => <option key={key} value={key}>{key}</option>)}</select></label><div className="live-pill" title={liveError || 'Change Stream do MongoDB Atlas em agent_handoffs'}><span className={liveStatus === 'live' ? 'ok' : liveStatus === 'connecting' ? 'connecting' : ''} />{liveStatus === 'live' ? 'ao vivo' : liveStatus === 'connecting' ? 'conectando' : 'offline'}</div><div className="health-pill"><span className={health ? 'ok' : ''} />{health ? `${health.storage} · ok` : 'conectando'}</div></div></nav>
-      <main className="content">
-        {error && <div className="error-banner">{error}<button onClick={() => setError('')}>×</button></div>}
+    <div data-pov-shell>
+      <a className="pov-skip-link" href="#conteudo-principal">Pular para o conteúdo</a>
+      <nav className="top-nav"><div className="nav-inner"><button className="brand" onClick={() => setNav('Chat')} aria-label="Ir para o Chat"><span className="leaf">◆</span><span>MongoDB</span><b>Agent Control Plane</b></button><div className="nav-tabs">{NAV.map((item) => <button className={nav === item ? 'active' : ''} aria-current={nav === item ? 'page' : undefined} key={item} onClick={() => setNav(item)}>{item}</button>)}</div><label className="identity-select">identidade<select value={customer?.customer_key || 'ana'} onChange={(event) => switchIdentity(event.target.value)}>{IDENTITIES.map((key) => <option key={key} value={key}>{key}</option>)}</select></label><div className="live-pill" title={liveError || 'Change Stream do MongoDB Atlas em agent_handoffs'}><span className={liveStatus === 'live' ? 'ok' : liveStatus === 'connecting' ? 'connecting' : ''} />{liveStatus === 'live' ? 'ao vivo' : liveStatus === 'connecting' ? 'conectando' : 'offline'}</div><div className="health-pill"><span className={health ? 'ok' : ''} />{health ? `${health.storage} · ok` : 'conectando'}</div></div></nav>
+      <main id="conteudo-principal" tabIndex={-1} className="content">
+        {error && <div className="error-banner">{error}<button aria-label="Fechar aviso" onClick={() => setError('')}>×</button></div>}
         {nav === 'Chat' && <>
           <header className="hero"><div><div className="hero-kicker">PoV · arquitetura multi-agente</div><h1>A colaboração é uma <span>query.</span></h1><p>Cada decisão, ferramenta e handoff deixa um documento consultável no MongoDB.</p></div><div className="turn-state"><span>turno atual</span><code>{conversationId || 'aguardando mensagem'}</code><b>{lastRun?.active_agent || '—'}</b><button className="new-conversation-btn" onClick={newConversation} disabled={busy}>+ nova conversa</button></div></header>
           {cast.length > 0 && (
@@ -365,6 +370,7 @@ export default function App() {
               </div>
             </div>
           )}
+          <ReplacementChain timeline={timeline} />
           <div className="stat-bar"><div><strong>{stats.agents}</strong><span>agentes ativos</span></div><div><strong>{stats.handoffs}</strong><span>handoffs no turno</span></div><div><strong className="small">{stats.route}</strong><span>origem da rota</span></div><div><strong>{stats.tokens}</strong><span>tokens estimados</span></div></div>
           {liveEvents.length > 0 && (
             <div className="live-feed">
@@ -384,10 +390,11 @@ export default function App() {
           <AiBrainInspector customerKey={customer?.customer_key} run={lastRun} conversationId={conversationId} />
         </>}
         {nav === 'Agentes' && <AgentsPage agents={agents} adminMode={adminMode} setAdminMode={setAdminMode} reload={loadCore} />}
+        {nav === 'Decisões' && <CompliancePage adminMode={adminMode} customerKey={customer?.customer_key} />}
         {nav === 'Guardrails' && <DataPage title="Segurança antes da inteligência." subtitle="Entrada é validada uma vez por turno, antes de qualquer modelo, memória ou trace.">{guardrails.length ? <pre>{JSON.stringify(guardrails, null, 2)}</pre> : <p className="inspector-empty">Nenhum evento ainda — só aparece aqui quando uma mensagem é de fato bloqueada. Tente o prompt de guardrail sugerido para a identidade Carla ou Diego.</p>}</DataPage>}
         {nav === 'Métricas' && <MetricsPage metrics={metrics} evalRuns={evalRuns} adminMode={adminMode} />}
       </main>
       <footer><span>MongoDB Atlas</span><code>multi_agent_poc + multiagent_brain</code><span>{customer?.name || 'identidade demo'}</span></footer>
-    </>
+    </div>
   );
 }
