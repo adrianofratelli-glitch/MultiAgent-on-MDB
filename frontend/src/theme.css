@@ -199,6 +199,7 @@ pre { white-space: pre-wrap; word-break: break-word; }
 .agent-card dl { margin: 0; border-top: 1px solid var(--border-subtle); }.agent-card dl div { display: grid; grid-template-columns: 65px 1fr; padding: 8px 0; border-bottom: 1px solid var(--border-subtle); }
 .agent-card dt { color: var(--text-muted); font: 9px 'JetBrains Mono'; }.agent-card dd { margin: 0; color: var(--text-sec); font: 10px 'JetBrains Mono'; }
 .switch { width: 38px; height: 21px; padding: 2px; border: 0; border-radius: 20px; background: var(--accent); }.switch span { display: block; width: 17px; height: 17px; border-radius: 50%; background: var(--bg-primary); transform: translateX(17px); transition: .2s; }.agent-card.disabled .switch { background: var(--text-muted); }.agent-card.disabled .switch span { transform: none; }
+.panel-label .admin-toggle { margin-top: 0; margin-left: auto; margin-right: 14px; }
 .admin-toggle { display: flex; align-items: center; gap: 10px; margin-top: 22px; color: var(--text-sec); font: 600 11px 'JetBrains Mono'; text-transform: uppercase; cursor: pointer; width: fit-content; }
 .admin-toggle input { position: absolute; opacity: 0; width: 0; height: 0; }
 .admin-toggle-track { width: 38px; height: 20px; border-radius: 20px; background: var(--bg-card); border: 1px solid var(--border-subtle); position: relative; transition: background 0.15s; }

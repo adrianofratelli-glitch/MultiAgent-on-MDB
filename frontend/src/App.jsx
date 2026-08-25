@@ -155,7 +155,7 @@ function MetricsPage({ metrics, evalRuns, adminMode }) {
       </div>
       <div className="eval-panel">
         <div className="panel-label"><span>qualidade · GoalSuccessRate</span><code>eval_runs</code></div>
-        {!adminMode && <p className="metric-empty">Ative o modo admin em Agentes para consultar o histórico de avaliação.</p>}
+        {!adminMode && <p className="metric-empty">Ligue o modo admin na aba Decisões para consultar o histórico de avaliação.</p>}
         {adminMode && !evalRuns.length && <p className="metric-empty">Nenhuma execução registrada. Rode <code>python eval.py</code> no backend.</p>}
         {adminMode && evalRuns.map((run) => (
           <div className="eval-run" key={run.at}>
@@ -197,14 +197,17 @@ export default function App() {
     const [h, a] = await Promise.all([api.health(), api.agents()]);
     setHealth(h); setAgents(a);
   };
-  const switchIdentity = async (customerKey) => {
+  // o boot abre sempre em conversa nova: uma demo que começa com o histórico do ensaio anterior
+  // na tela parece que o cliente já falou com o agente. a retomada continua valendo ao trocar de
+  // identidade no meio da sessão, que é quando ela realmente evita um painel vazio.
+  const switchIdentity = async (customerKey, { resume = true } = {}) => {
     try {
       const who = await api.login(customerKey); setCustomer(who); await loadCore();
       const [mem, gr, met, lastConv, scenarios] = await Promise.all([api.memory(who.customer_key), api.guardrails('events'), api.metrics(), api.latestConversation(), api.demoScenarios()]);
       setMemory(mem); setGuardrails(gr); setMetrics(met);
       setDemoScenarios(scenarios);
       setHandoffs([]);
-      if (lastConv?.turns?.length) {
+      if (resume && lastConv?.turns?.length) {
         setConversationId(lastConv.conversation_id);
         setMessages(lastConv.turns.map((turn) => ({ role: turn.role, agent: lastConv.active_agent, text: turn.content })));
         // sem isso a conversa retomada mostra o texto certo mas raio-x/esteira vazios — parece que o
@@ -216,7 +219,7 @@ export default function App() {
       }
     } catch (err) { setError(err.message); }
   };
-  useEffect(() => { switchIdentity('ana'); }, []);
+  useEffect(() => { switchIdentity('ana', { resume: false }); }, []);
 
   useEffect(() => {
     if (nav === 'Métricas' && adminMode) {
@@ -353,7 +356,7 @@ export default function App() {
           <ReplacementChain timeline={timeline} />
           <div className="workspace workspace--focus"><ChatPanel key={customer?.customer_key} {...{ messages, input, setInput, send, busy, suggestions }} customerName={customer?.name} demos={demoScenarios} onSuggestion={(message) => send(message)} /><section className="timeline-panel"><div className="panel-label"><span>execução</span><code>{timeline.length} eventos</code></div><Timeline events={timeline} /></section></div>
         </>}
-        {nav === 'Decisões' && <CompliancePage adminMode={adminMode} customerKey={customer?.customer_key} />}
+        {nav === 'Decisões' && <CompliancePage adminMode={adminMode} setAdminMode={setAdminMode} customerKey={customer?.customer_key} />}
       </main>
     </div>
   );

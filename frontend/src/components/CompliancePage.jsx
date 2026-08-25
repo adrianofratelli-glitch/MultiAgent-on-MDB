@@ -57,7 +57,7 @@ function ReviewQueue({ adminMode, onResolved }) {
   };
 
   if (!adminMode) {
-    return <p className="metric-empty">Ative o modo admin na aba <b>Agentes</b> para abrir a fila do analista.</p>;
+    return <p className="metric-empty">Ligue o modo admin acima para abrir a fila do analista.</p>;
   }
   if (error) return <p className="metric-empty">{error}</p>;
   if (loaded && !reviews.length) {
@@ -189,7 +189,7 @@ function DecisionTrail({ trail }) {
   );
 }
 
-export default function CompliancePage({ adminMode, customerKey }) {
+export default function CompliancePage({ adminMode, setAdminMode, customerKey }) {
   const [trail, setTrail] = useState(null);
   const [error, setError] = useState('');
 
@@ -216,7 +216,15 @@ export default function CompliancePage({ adminMode, customerKey }) {
       </div>
 
       <div className="compliance-block">
-        <div className="panel-label"><span>fila do analista</span><code>pending_reviews</code></div>
+        <div className="panel-label">
+          <span>fila do analista</span>
+          <label className="admin-toggle">
+            <input type="checkbox" checked={adminMode} onChange={(event) => setAdminMode(event.target.checked)} />
+            <span className="admin-toggle-track"><span className="admin-toggle-thumb" /></span>
+            modo admin {adminMode ? '(ligado)' : '(desligado)'}
+          </label>
+          <code>pending_reviews</code>
+        </div>
         <ReviewQueue adminMode={adminMode} onResolved={loadTrail} />
       </div>
 
