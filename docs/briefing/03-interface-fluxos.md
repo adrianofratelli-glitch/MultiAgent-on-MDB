@@ -1,8 +1,15 @@
 # Multi-Agent on MongoDB — interface, fluxos e roteiro
 
-> Terceiro dos três prompts. A tela, os cenários versionados e a demo.
+> Terceira parte do briefing. A tela, os cenários versionados e a demo.
 
 ---
+## Estado atual — modo palco
+
+A navegação principal foi reduzida a **Chat** e **Decisões**. O Chat usa duas
+colunas: conversa e execução/handoffs. Registry, métricas, guardrails e
+inspetores profundos deixaram o palco principal; seus dados e endpoints não
+foram transformados em simulação. As duas abas abaixo são a navegação canônica.
+
 ## Contrato visual do portfólio (v2)
 
 Esta UI participa da assinatura MongoDB Dark das PoVs. O arquivo
@@ -23,37 +30,32 @@ produção e do estado offline.
 
 React 18 + Vite, **JavaScript puro** (`.jsx`, sem TypeScript), CSS próprio em `src/theme.css` (umas 280 linhas). **Sem UI kit, sem router, sem biblioteca de estado, sem devDependencies.**
 
-Isso é deliberado. Numa PoV que já carrega oito agentes, Atlas, change stream e LLM, colocar Redux e um design system em cima só aumenta a superfície de coisa pra quebrar cinco minutos antes da demo. `useState` no `App.jsx` passado por props dá conta. Navegação é um estado `nav` com quatro abas, ponto.
+Isso é deliberado. Numa PoV que já carrega oito agentes, Atlas, change stream e LLM, colocar Redux e um design system em cima só aumenta a superfície de coisa pra quebrar cinco minutos antes da demo. `useState` no `App.jsx` passado por props dá conta. Navegação é um estado `nav` com duas abas, ponto.
 
 São quatro arquivos além do `App.jsx`: `api.js` e três componentes.
 
-## As cinco abas
+## As duas abas
 
 Cada uma responde uma pergunta que sempre aparece:
 
 | Aba | Pergunta que responde |
 | --- | --- |
-| **Chat** | Funciona? É o palco: conversa, raio-x do turno e inspetores lado a lado |
-| **Agentes** | Quem são os oito? Registry vindo do Atlas, editável em modo admin |
+| **Chat** | Funciona? É o palco: conversa e execução/handoffs lado a lado |
 | **Decisões** | Quem decidiu, e com base em quê? Fila de casos pausados + trilha imutável |
-| **Guardrails** | E se alguém tentar burlar? |
-| **Métricas** | Está coberto? Cobertura, coordenação, escritas e as rodadas de avaliação |
-
-**A aba Guardrails começa vazia de propósito**, com um texto explicando isso e dizendo qual identidade tem o prompt de guardrail. Ela só popula quando uma mensagem é bloqueada de verdade, ao vivo. Tela vazia com explicação é melhor que tela cheia com dado falso — a primeira pergunta de qualquer banca é justamente se aquilo ali é real.
 
 ## O que a aba Chat mostra, de cima pra baixo
 
 Essa ordem não é estética, é a ordem em que eu narro a demo:
 
-1. **Hero** com o `conversation_id` do turno e o agente ativo, mais um botão "+ nova conversa" que limpa o estado local (inclusive métricas e feed ao vivo).
+1. **Cabeçalho compacto** com o `conversation_id`, agente ativo e nova conversa.
 2. **Esteira de agentes** (`agent-cast`) — quem atuou, na ordem, deduplicado por adjacência. Entre eles, "chamou →" com o motivo do handoff no `title`; num turno de fan-out vira "+ (paralelo)" e o rótulo muda pra "despacho paralelo". Essa faixa é a coisa que o cliente entende em dois segundos.
 3. **Coleções em ação neste turno** — chip por collection com badge de operação (`leitura`, `escrita`, `$vectorSearch`, `híbrido BM25 + vetor`, `change stream`, `$graphLookup`), cada badge com tooltip de qual agente e qual evento. O rótulo do híbrido deixou de citar "RRF" porque a fusão agora roda server-side com `$rankFusion`; qual dos dois caminhos rodou está no título do evento na `Timeline`, não no badge.
 4. **Cadeia de trocas** (`ReplacementChain`) — só aparece quando a travessia de grafo rodou no turno. Lê o evento com `op: "graphLookup"` e desenha a corrente `PED-3001 → PED-3011 → PED-3021 → PED-3031`, três contadores (reposições, unidades do mesmo produto, produtos distintos) e um veredito. É o painel que explica visualmente por que a resposta mudou: nenhum documento sozinho diz "é a quarta vez". O rodapé diz quantas idas ao banco a agregação substituiu — é a frase que se usa contra "isso eu faço com um loop".
-5. **Barra de estatísticas** — agentes ativos, handoffs no turno, origem da rota, tokens estimados.
-6. **Feed ao vivo** — o último handoff vindo do Change Stream. Só o último, de propósito: lista crescendo sozinha durante a fala distrai mais do que prova.
-7. **`AiBrainHighlights`** — quatro cartões de governança: identidade e isolamento; cascata (HIT com fonte e tokens economizados, ou MISS com tokens gastos); guardrail (aprovado com score, ou bloqueado); e memória (quantos itens de longo prazo, se teve fato novo).
-8. **Workspace em três colunas** — `ChatPanel` | `Timeline` | `Inspector`.
-9. **`AiBrainInspector`** — abas por collection (`semantic_cache`, `short_term_memory`, `long_term_memory`, `customer_memory`) mostrando os documentos crus da identidade logada, com scope, TTL e marcação de supersessão.
+5. **Workspace em duas colunas** — `ChatPanel` | `Timeline`.
+
+Feed global, cards de governança e inspetores por collection não fazem parte do
+palco. A `Timeline` continua expondo consulta, collection, motivo e resultado
+do turno sob demanda.
 
 A `Timeline` renderiza cada evento com número, badge de categoria (`agente`/`memória`/`guardrail`/`cache`/`coordenação`/`paralelo`), agente, duração em ms, collection tocada, motivo do handoff entre aspas, e dois `<details>` — filtro/consulta e resultado. O de handoff abre por padrão; o resto fica fechado pra não virar parede de JSON.
 
@@ -102,7 +104,7 @@ Marca `warmup: true` só nos cenários **read-only**. Escrita, guardrail e cadei
 
 1. **Pergunta composta independente** — status do pedido + fatura. Mostrar o fan-out paralelo na esteira de agentes.
 2. **Pergunta com dependência real** — defeito + troca + entrega + confirmação. Mostrar a cadeia de 5 atuações, cada handoff virando documento, e o **retorno controlado** no fim.
-3. **Abrir os inspetores** e mostrar quais coleções foram tocadas e com qual operação. Orquestração auditável por query, não por log.
+3. **Abrir os detalhes da Timeline** e mostrar quais coleções foram tocadas e com qual operação. Orquestração auditável por query, não por log.
 4. **Tentar burlar o guardrail com paráfrase.** Bloqueia sem chamar LLM, que é a camada vetorial fazendo o trabalho.
 5. **Fazer a pergunta legítima vizinha do ataque** e mostrar que ela passa. Guardrail que só bloqueia não é guardrail, é filtro quebrado.
 6. **Tentar um fraseado novo.** O classificador pega, grava na denylist, e a próxima tentativa parecida sai de graça.
@@ -111,11 +113,11 @@ Marca `warmup: true` só nos cenários **read-only**. Escrita, guardrail e cadei
 9. **Trocar o modelo de um agente ao vivo** no registry e refazer a pergunta. Sem redeploy.
 10. **Mostrar `eval_runs`** — histórico de pass/fail do golden dataset. Regressão de agente é mensurável.
 
-## O inspetor precisa distinguir as duas primeiras abas
+## Contrato de memória exposto pela Timeline
 
-Todo turno entra em `short_term_memory`, mas apenas respostas estáveis e explicitamente elegíveis entram em `semantic_cache`, marcadas com `cache_policy: stable_v1`. Consultas de estado operacional, handoffs, uso de memória e writes ficam somente no curto prazo, evitando replay de pedido/fatura desatualizados em outra conversa. Documentos de políticas anteriores permanecem até o TTL, mas não participam da leitura nem aparecem no inspetor.
+Todo turno entra em `short_term_memory`, mas apenas respostas estáveis e explicitamente elegíveis entram em `semantic_cache`, marcadas com `cache_policy: stable_v1`. Consultas de estado operacional, handoffs, uso de memória e writes ficam somente no curto prazo, evitando replay de pedido/fatura desatualizados em outra conversa. Documentos de políticas anteriores permanecem até o TTL, mas não participam da leitura.
 
-Cada aba carrega uma legenda própria explicando o corte e o escopo, e cada documento mostra:
+Quando esses dados aparecem no detalhe do evento, cada documento mostra:
 
 - em `short_term_memory`: o **`session_id`**, marcado como *esta conversa* ou *conversa anterior*;
 - em `semantic_cache`: o **`scope`** (`customer` = vale entre suas conversas, `global` = público da área, `faq` = pré-carregado no seed).
@@ -135,5 +137,4 @@ Nessa ordem, e o primeiro item não é opcional:
 1. **`python backend/seed.py`** — restaura status de pedido/fatura/pontos **e invalida o cache**. Sem isso, o cache do dia anterior responde sobre um mundo que o seed acabou de desfazer.
 2. **`python backend/warmup.py`** — é o que faz o passo 7 do roteiro ser um HIT genuíno. Roda **depois** do seed, nunca antes.
 3. Portas 8031 e 5191 livres — as duas são estritas e o processo sai se estiverem ocupadas.
-4. Aba Guardrails vazia, como ela deve começar.
-5. Opcional, se der tempo: `python backend/eval.py` — 28/28 antes de subir no palco.
+4. Opcional, se der tempo: `python backend/eval.py` — 28/28 antes de subir no palco.

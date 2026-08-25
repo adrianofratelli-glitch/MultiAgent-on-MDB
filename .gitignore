@@ -26,3 +26,8 @@ docs/Guia-PoV-Multi-Agent.pdf
 outputs/
 pov-agent-memory-mongodb-template.pdf
 AGENTS.md CLAUDE.md 
+
+# Instruções locais de ferramenta — não versionar
+CLAUDE.md
+AGENTS.md
+.claude/

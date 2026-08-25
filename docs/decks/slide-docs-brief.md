@@ -23,8 +23,6 @@ Idioma: português. Termos técnicos (README, ADR, change stream, fan-out) ficam
 ```
 multiagente-atendimento/
 ├── README.md                  a porta de entrada pública
-├── CLAUDE.md                  memória do projeto (Claude)
-├── AGENTS.md                  mesmo contrato, para o Codex
 ├── implementation_plan.md     briefing original, 408 linhas
 ├── .env.example               segredos esperados, sem valor
 ├── docs/
@@ -43,7 +41,7 @@ multiagente-atendimento/
 Para quem: cliente e visitante do GitHub.
 Traz o problema em um parágrafo, a demo em 5 passos numerados com um print cada, a tabela de agentes e o setup.
 
-**2 · CLAUDE.md / AGENTS.md** — âmbar
+**2 · Briefing de arquitetura** — âmbar
 Para quem: o assistente de código.
 Traz comandos exatos, arquitetura em prosa, decisões já pagas e lacunas conhecidas. Evita que cada sessão redescubra o projeto.
 
@@ -74,7 +72,7 @@ Quatro itens em duas colunas:
 
 ## Notas do apresentador
 
-A documentação do PoV é dividida por leitor: README para o cliente, CLAUDE.md/AGENTS.md
+A documentação do PoV é dividida por leitor: README para o cliente, o briefing de arquitetura
 para o assistente de código, implementation_plan.md para quem reconstrói, architecture.md
 e ADR-001 para o arquiteto. Faltam runbook de demo, modelo de dados, ADRs novos e SECURITY.md.
 

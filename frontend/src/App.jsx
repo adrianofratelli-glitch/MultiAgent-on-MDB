@@ -1,19 +1,16 @@
 import { useEffect, useMemo, useState } from 'react';
 import { api } from './api.js';
-import AiBrainInspector, { AiBrainHighlights } from './components/AiBrainPanel.jsx';
-import Inspector from './components/Inspector.jsx';
 import Timeline from './components/Timeline.jsx';
 import ReplacementChain from './components/ReplacementChain.jsx';
 import CompliancePage from './components/CompliancePage.jsx';
 
-const NAV = ['Chat', 'Agentes', 'Decisões', 'Guardrails', 'Métricas'];
+const NAV = ['Chat', 'Decisões'];
 // O rótulo do híbrido não cita mais o RRF na aplicação: a fusão passou a rodar server-side
 // com $rankFusion, e o título do evento diz qual dos dois caminhos rodou de fato.
 const OP_LABELS = { read: 'leitura', write: 'escrita', vectorSearch: '$vectorSearch', hybridSearch: 'híbrido BM25 + vetor', changeStream: 'change stream', graphLookup: '$graphLookup' };
 const IDENTITIES = ['ana', 'bruno', 'carla', 'diego'];
 
 function ChatPanel({ messages, input, setInput, send, busy, customerName, demos, suggestions, onSuggestion }) {
-  const [selectedScenario, setSelectedScenario] = useState(null);
   return (
     <section className="chat-panel">
       <div className="panel-label">canal do cliente</div>
@@ -26,9 +23,7 @@ function ChatPanel({ messages, input, setInput, send, busy, customerName, demos,
             <small>{message.role === 'user' ? 'você' : message.agent || 'assistente'}</small>
             {message.role === 'assistant' && (
               <span className={`cache-badge ${message.cacheHit ? 'hit' : 'miss'}`}>
-                {message.cacheHit
-                  ? `⚡ HIT (${message.cacheSource === 'curto_prazo' ? 'sessão atual' : 'cache global'}) — 0 tokens`
-                  : `🔄 MISS — ${message.tokens ?? 0} tokens, contexto de longo prazo usado: ${message.longTermUsed ? 'sim' : 'não'}`}
+                {message.cacheHit ? '⚡ cache hit · 0 tokens' : `cache miss · ${message.tokens ?? 0} tokens`}
               </span>
             )}
             <div>{message.text}</div>
@@ -57,18 +52,11 @@ function ChatPanel({ messages, input, setInput, send, busy, customerName, demos,
           const demo = demos[Number(event.target.value)];
           if (demo) {
             setInput(demo.message);
-            setSelectedScenario(demo);
           }
         }}>
           <option value="">Carregar um cenário de demonstração…</option>
           {demos.map((demo, index) => <option key={demo.scenario_id} value={index}>{demo.label}</option>)}
         </select>
-        {selectedScenario && (
-          <div className="scenario-proof">
-            <span>o que este cenário prova</span>
-            <div>{selectedScenario.capabilities.map((capability) => <code key={capability}>{capability}</code>)}</div>
-          </div>
-        )}
       </label>
     </section>
   );
@@ -184,7 +172,6 @@ function MetricsPage({ metrics, evalRuns, adminMode }) {
 
 export default function App() {
   const [nav, setNav] = useState('Chat');
-  const [inspector, setInspector] = useState('agents');
   const [health, setHealth] = useState(null);
   const [customer, setCustomer] = useState(null);
   const [agents, setAgents] = useState([]);
@@ -202,7 +189,6 @@ export default function App() {
   const [lastRun, setLastRun] = useState(null);
   const [suggestions, setSuggestions] = useState([]);
   const [adminMode, setAdminMode] = useState(false);
-  const [liveEvents, setLiveEvents] = useState([]);
   const [liveStatus, setLiveStatus] = useState('connecting');
   const [liveError, setLiveError] = useState('');
   const [evalRuns, setEvalRuns] = useState([]);
@@ -248,9 +234,7 @@ export default function App() {
       while (!cancelled && !activeController.signal.aborted) {
         try {
           setLiveStatus('connecting');
-          await api.streamEvents((event) => {
-            setLiveEvents([{ ...event, receivedAt: Date.now() }]);
-          }, activeController.signal, () => {
+          await api.streamEvents(() => {}, activeController.signal, () => {
             setLiveStatus('live');
             setLiveError('');
           });
@@ -287,7 +271,7 @@ export default function App() {
 
   const newConversation = () => {
     setConversationId(null); setMessages([]); setTimeline([]); setLastRun(null); setHandoffs([]); setInput(''); setSuggestions([]);
-    setGuardrails([]); setMetrics({}); setLiveEvents([]);
+    setGuardrails([]); setMetrics({});
   };
 
   const send = async (override) => {
@@ -306,8 +290,6 @@ export default function App() {
     finally { setBusy(false); }
   };
 
-  const stats = useMemo(() => ({ agents: health?.counts?.agents ?? '—', handoffs: handoffs.length, route: lastRun?.route_source ?? '—', tokens: lastRun?.usage?.total ?? 0 }), [health, handoffs, lastRun]);
-
   const agentLabels = useMemo(() => Object.fromEntries(agents.map((agent) => [agent.agent_key, agent.label])), [agents]);
   const cast = useMemo(() => {
     const sequence = (timeline || [])
@@ -315,8 +297,6 @@ export default function App() {
       .map((event) => event.agent);
     return sequence.filter((agent, index) => agent !== sequence[index - 1]);
   }, [timeline]);
-
-  const data = { agents, handoffs, memory, guardrails, metrics, castKeys: cast };
 
   const collectionsTouched = useMemo(() => {
     const byCollection = new Map();
@@ -335,7 +315,7 @@ export default function App() {
       <main id="conteudo-principal" tabIndex={-1} className="content">
         {error && <div className="error-banner">{error}<button aria-label="Fechar aviso" onClick={() => setError('')}>×</button></div>}
         {nav === 'Chat' && <>
-          <header className="hero"><div><div className="hero-kicker">PoV · arquitetura multi-agente</div><h1>A colaboração é uma <span>query.</span></h1><p>Cada decisão, ferramenta e handoff deixa um documento consultável no MongoDB.</p></div><div className="turn-state"><span>turno atual</span><code>{conversationId || 'aguardando mensagem'}</code><b>{lastRun?.active_agent || '—'}</b><button className="new-conversation-btn" onClick={newConversation} disabled={busy}>+ nova conversa</button></div></header>
+          <header className="stage-header"><div><span>coordenação no Atlas</span><h1>Agentes em ação.</h1></div><div className="turn-state"><code>{conversationId || 'novo turno'}</code><b>{lastRun?.active_agent || 'aguardando'}</b><button className="new-conversation-btn" onClick={newConversation} disabled={busy}>Nova conversa</button></div></header>
           {cast.length > 0 && (
             <div className="agent-cast" title={lastRun?.route_source === 'fanout' ? 'Agentes despachados em paralelo (fan-out), não em cadeia' : 'Agentes que participaram deste turno, em ordem de atuação'}>
               <span className="agent-cast-label">{lastRun?.route_source === 'fanout' ? 'despacho paralelo' : 'agentes em ação'}</span>
@@ -371,30 +351,10 @@ export default function App() {
             </div>
           )}
           <ReplacementChain timeline={timeline} />
-          <div className="stat-bar"><div><strong>{stats.agents}</strong><span>agentes ativos</span></div><div><strong>{stats.handoffs}</strong><span>handoffs no turno</span></div><div><strong className="small">{stats.route}</strong><span>origem da rota</span></div><div><strong>{stats.tokens}</strong><span>tokens estimados</span></div></div>
-          {liveEvents.length > 0 && (
-            <div className="live-feed">
-              <div className="panel-label"><span>último handoff · agent_handoffs</span><code>change stream</code></div>
-              {liveEvents.map((event, index) => (
-                <div className="live-feed-item" key={`${event.at}-${index}`}>
-                  <span className="teal-dot" />
-                  <b>{event.from_agent}</b> → <b>{event.to_agent}</b>
-                  <small>{event.reason}</small>
-                </div>
-              ))}
-            </div>
-          )}
-          <AiBrainHighlights customer={customer} lastRun={lastRun} timeline={timeline} />
-          <div className="workspace"><ChatPanel key={customer?.customer_key} {...{ messages, input, setInput, send, busy, suggestions }} customerName={customer?.name} demos={demoScenarios} onSuggestion={(message) => send(message)} /><section className="timeline-panel"><div className="panel-label"><span>raio-x do turno</span><code>{timeline.length} eventos</code></div><Timeline events={timeline} /></section><Inspector tab={inspector} {...data} /></div>
-          <div className="inspector-tabs">{['agents', 'handoffs', 'memory', 'guardrails', 'metrics'].map((item) => <button className={inspector === item ? 'active' : ''} onClick={() => setInspector(item)} key={item}>{item}</button>)}</div>
-          <AiBrainInspector customerKey={customer?.customer_key} run={lastRun} conversationId={conversationId} />
+          <div className="workspace workspace--focus"><ChatPanel key={customer?.customer_key} {...{ messages, input, setInput, send, busy, suggestions }} customerName={customer?.name} demos={demoScenarios} onSuggestion={(message) => send(message)} /><section className="timeline-panel"><div className="panel-label"><span>execução</span><code>{timeline.length} eventos</code></div><Timeline events={timeline} /></section></div>
         </>}
-        {nav === 'Agentes' && <AgentsPage agents={agents} adminMode={adminMode} setAdminMode={setAdminMode} reload={loadCore} />}
         {nav === 'Decisões' && <CompliancePage adminMode={adminMode} customerKey={customer?.customer_key} />}
-        {nav === 'Guardrails' && <DataPage title="Segurança antes da inteligência." subtitle="Entrada é validada uma vez por turno, antes de qualquer modelo, memória ou trace.">{guardrails.length ? <pre>{JSON.stringify(guardrails, null, 2)}</pre> : <p className="inspector-empty">Nenhum evento ainda — só aparece aqui quando uma mensagem é de fato bloqueada. Tente o prompt de guardrail sugerido para a identidade Carla ou Diego.</p>}</DataPage>}
-        {nav === 'Métricas' && <MetricsPage metrics={metrics} evalRuns={evalRuns} adminMode={adminMode} />}
       </main>
-      <footer><span>MongoDB Atlas</span><code>multi_agent_poc + multiagent_brain</code><span>{customer?.name || 'identidade demo'}</span></footer>
     </div>
   );
 }

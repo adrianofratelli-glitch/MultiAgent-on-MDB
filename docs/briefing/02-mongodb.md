@@ -1,6 +1,6 @@
 # Multi-Agent on MongoDB — MongoDB: bases, índices, embeddings e queries
 
-> Segundo dos três prompts. O Atlas aqui é data plane e coordination plane ao mesmo tempo. Este arquivo mostra o que isso significa em coleção, índice, embedding e **query executada** — com o pipeline colado e o motivo de cada parâmetro.
+> Segunda parte do briefing. O Atlas aqui é data plane e coordination plane ao mesmo tempo. Este arquivo mostra o que isso significa em coleção, índice, embedding e **query executada** — com o pipeline colado e o motivo de cada parâmetro.
 >
 > É o mais longo dos três de propósito: a tese é que orquestração de agente cabe num cluster e fica auditável por query. A query precisa estar escrita.
 
