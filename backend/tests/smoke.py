@@ -69,9 +69,31 @@ def main() -> None:
         foreign.raise_for_status()
         check("Não encontrei" in foreign.json()["response"], "isolamento entre clientes")
 
-        repeated = client.post("/api/chat", headers=headers, json={"message": "onde está meu pedido PED-1001?"})
+        repeated = client.post(
+            "/api/chat",
+            headers=headers,
+            json={
+                "message": "onde está meu pedido PED-1001?",
+                "conversation_id": body["conversation_id"],
+            },
+        )
         repeated.raise_for_status()
-        check(repeated.json()["cache_hit"] is True, "cache por agente e área")
+        check(
+            repeated.json()["cache_hit"] is True
+            and repeated.json()["cache_source"] == "curto_prazo",
+            "cache personalizado reutilizado somente na mesma conversa",
+        )
+
+        new_session = client.post(
+            "/api/chat",
+            headers=headers,
+            json={"message": "onde está meu pedido PED-1001?"},
+        )
+        new_session.raise_for_status()
+        check(
+            new_session.json()["cache_hit"] is False,
+            "cache personalizado não vaza para uma conversa nova",
+        )
 
         metrics = client.get("/api/metrics", headers=headers)
         check(metrics.status_code == 200 and "counters" in metrics.json(), "métricas disponíveis")

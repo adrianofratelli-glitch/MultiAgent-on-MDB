@@ -66,6 +66,11 @@ python tests/smoke.py <url>     # caixa-preta
 python eval.py <url>            # golden dataset, resultados em eval_runs
 ```
 
+O smoke repete a consulta personalizada dentro do mesmo `conversation_id` e
+exige HIT em `short_term_memory`; em seguida abre uma conversa nova e exige
+MISS. Assim ele valida o cache sem transformar replay de estado operacional em
+vazamento entre sessões.
+
 ## Fronteira de produção
 
 Defina `ENVIRONMENT=production`, `AUTH_REQUIRED=1` e `DEMO_TOKEN_ISSUANCE_ENABLED=0`. A inicialização então falha fechada em caso de segredo de JWT/admin fraco ou padrão, CORS com curinga, autenticação desabilitada ou emissão de token de demo ligada. O `/metrics` é só para admin. O lançador local continua sendo um runtime de PoV; adicione terminação TLS, um IdP corporativo e uma plataforma gerenciada de processos/containers antes de qualquer exposição externa.

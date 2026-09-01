@@ -124,6 +124,11 @@ Quando esses dados aparecem no detalhe do evento, cada documento mostra:
 
 E uma regra que era bug: **a visão de curto prazo é filtrada pela conversa atual.** Antes ela filtrava só por `customer_key`, então abrir uma aba nova — sem ter perguntado nada — já exibia cinco documentos de conversas antigas. O painel contradizia o conceito que ele existe para provar. Sem conversa ativa, a resposta certa é vazio, com o texto explicando que a memória curta nasce vazia e é preenchida a cada turno.
 
+O smoke preserva esse contrato: pergunta de pedido repetida no mesmo
+`conversation_id` precisa bater no curto prazo; a mesma frase sem o ID abre uma
+sessão nova e precisa executar de novo. Esperar HIT entre sessões para estado de
+pedido seria um teste de vazamento, não de cache.
+
 ## Chips de próximo passo
 
 Toda resposta traz `suggestions[]` — próximos passos derivados de query, cada um com a mensagem exata que ele dispara. A UI renderiza como chips acima do campo de texto, e clicar envia direto.
