@@ -1,3 +1,5 @@
+import QueryDetails from './QueryDetails.jsx';
+
 const CATEGORY_LABELS = {
   agent: 'agente', memory: 'memória', guardrail: 'guardrail', cache: 'cache', handoff: 'coordenação', fanout: 'paralelo',
 };
@@ -32,9 +34,14 @@ export default function Timeline({ events }) {
             {event.collection && <div className="mongo-operation"><span>MongoDB</span><code>{event.collection}</code></div>}
             {event.reason && <p className="handoff-reason">“{event.reason}”</p>}
             <div className="event-data">
-              {event.filter && <details><summary>Filtro / consulta</summary><JsonBlock value={event.filter} /></details>}
               {event.result !== undefined && <details open={event.category === 'handoff'}><summary>Resultado</summary><JsonBlock value={event.result} /></details>}
             </div>
+            <QueryDetails
+              operation={event.op}
+              namespace={event.collection}
+              query={event.query || (event.filter ? { filter: event.filter } : undefined)}
+              explain={event.explain}
+            />
           </div>
         </article>
       ))}
