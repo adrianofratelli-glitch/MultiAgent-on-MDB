@@ -19,12 +19,11 @@ O ciclo completo:
 do agente mensurável em vez de anedótica.
 """
 
-import asyncio
 import logging
 import uuid
 from typing import Any
 
-from .database import DataStore, is_transient_transaction_error, utcnow
+from .database import DataStore, run_in_transaction_with_retry, utcnow
 from .decisions import build_decision_doc, record_decision
 from .metrics import metrics
 
@@ -109,40 +108,14 @@ async def list_reviews(store: DataStore, *, customer_key: str | None = None,
     return [{key: value for key, value in item.items() if key != "_id"} for item in items]
 
 
-RESOLVE_MAX_ATTEMPTS = 3
-
-
 async def resolve_review(store: DataStore, review_id: str, *, human_decision: str,
                          resolved_by: str, note: str = "") -> dict | None:
-    """Resolve a revisão, repetindo enquanto o MongoDB sinalizar conflito transitório.
+    """Resolve a revisão, repetindo (via `run_in_transaction_with_retry`) enquanto o MongoDB
+    sinalizar conflito transitório.
 
     Repetir é o tratamento que o servidor pede em `TransientTransactionError` — e aqui ele
     converge sozinho: na segunda tentativa o caso já está `resolved`, o `find_one` por
     `status: "pending"` não acha nada, e o perdedor da corrida recebe o `None` que vira 404.
-    """
-    for attempt in range(1, RESOLVE_MAX_ATTEMPTS + 1):
-        try:
-            return await _resolve_review_once(store, review_id, human_decision=human_decision,
-                                              resolved_by=resolved_by, note=note)
-        except Exception as exc:
-            if not is_transient_transaction_error(exc) or attempt == RESOLVE_MAX_ATTEMPTS:
-                raise
-            logger.info("conflito transitório resolvendo %s (tentativa %d) — repetindo",
-                        review_id, attempt)
-            await asyncio.sleep(0.05 * attempt)
-    return None
-
-
-async def _resolve_review_once(store: DataStore, review_id: str, *, human_decision: str,
-                               resolved_by: str, note: str = "") -> dict | None:
-    """Fecha a pausa: grava a decisão humana e devolve o caso ao agente.
-
-    Tudo numa transação: a marcação de resolvido, a decisão final, o evento de auditoria e o
-    handoff de volta ao agente. Ou o caso fecha inteiro, ou continua pendente exatamente como
-    estava — não existe estado intermediário para um analista encontrar.
-
-    O update aqui é no `pending_reviews` (uma fila de trabalho, mutável por natureza) — nunca
-    em `agent_decisions`, que é imutável. A decisão final é um documento NOVO.
     """
     review = await store.find_one(REVIEWS_COLLECTION, {"review_id": review_id, "status": "pending"})
     if not review:
@@ -150,7 +123,7 @@ async def _resolve_review_once(store: DataStore, review_id: str, *, human_decisi
 
     overridden = human_decision != review["recommended_action"]
 
-    async with store.transaction() as tx:
+    async def _body(tx) -> bool:
         # A reivindicação continua sendo um update condicional em status="pending", mesmo
         # dentro da transação: é ele que resolve a corrida entre dois analistas: quem não
         # modificar documento nenhum perdeu, e sai sem efeito colateral. A transação cuida
@@ -164,7 +137,7 @@ async def _resolve_review_once(store: DataStore, review_id: str, *, human_decisi
             session=tx,
         )
         if not claimed:
-            return None
+            return False
 
         decision = await record_decision(store, build_decision_doc(
             action=human_decision,
@@ -211,6 +184,11 @@ async def _resolve_review_once(store: DataStore, review_id: str, *, human_decisi
                           + (f" (agente havia recomendado {review['recommended_action']})" if overridden else ""),
                 "at": utcnow(),
             }, session=tx)
+        return True
+
+    claimed = await run_in_transaction_with_retry(store, _body)
+    if not claimed:
+        return None
 
     resolved = await store.find_one(REVIEWS_COLLECTION, {"review_id": review_id})
     return {key: value for key, value in (resolved or {}).items() if key != "_id"}

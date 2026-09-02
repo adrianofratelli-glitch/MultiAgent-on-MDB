@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from time import perf_counter
 from typing import Any
 
-from .database import DataStore, utcnow
+from .database import DataStore, run_in_transaction_with_retry, utcnow
 from .guidance import customer_snapshot, format_options, no_data_reply
 from .memory import active_facts
 from .models import TimelineEvent
@@ -175,7 +175,7 @@ async def run_order_agent(store: DataStore, message: str, customer: dict, llm=No
             # Mudança de status e registro da decisão numa transação só: se o registro
             # falhar, o pedido volta ao status anterior. Mundo alterado sem trilha era
             # justamente o furo que a trilha existe para impedir.
-            async with store.transaction() as tx:
+            async def _write(tx):
                 await store.update_one("orders", write_query, update, session=tx)
                 await record_decision(store, build_decision_doc(
                     action="order_status_change", subject_id=clean["order_id"],
@@ -184,6 +184,7 @@ async def run_order_agent(store: DataStore, message: str, customer: dict, llm=No
                     reasoning=f"Cliente pediu explicitamente a mudança para '{requested_status}'.",
                     payload={"from": previous_status, "to": requested_status, "product": clean["product"]},
                 ), session=tx)
+            await run_in_transaction_with_retry(store, _write)
             clean["status"] = requested_status
             response = f"O pedido {clean['order_id']} de {clean['product']} foi atualizado para **{requested_status}**."
             title = "Atualização segura de status do pedido"
@@ -360,6 +361,11 @@ async def run_warranty_agent(store: DataStore, message: str, customer: dict, llm
     return AgentResult(synthesized or response, event, extra_events=tail_events)
 
 
+# Janela de deduplicação de resgate: um retry de rede plausível (timeout + reenvio) chega em
+# segundos, não minutos; 20s cobre isso sem arriscar negar um segundo resgate genuinamente novo
+# do mesmo item que o cliente peça pouco depois.
+REDEMPTION_IDEMPOTENCY_WINDOW_SECONDS = 20
+
 REWARD_CATALOG = {
     "frete gratis": ("frete grátis no próximo pedido", 300),
     "cupom de desconto": ("cupom de 10% de desconto", 500),
@@ -404,6 +410,26 @@ async def run_loyalty_agent(store: DataStore, message: str, customer: dict, llm=
         # resgate real: escrita restrita a $inc de pontos (nunca um valor arbitrário do modelo) + registro em
         # redemptions — mesmo padrão de segurança do order_agent (filtro reconstruído, campo aprovado só).
         label, cost = REWARD_CATALOG[reward_key]
+        # Idempotência: um retry de rede no /api/chat (timeout do cliente, reenvio automático) reprocessa a
+        # mesma intenção do zero. Sem esta checagem, um resgate idêntico dentro de uma janela curta debitaria
+        # os pontos duas vezes — diferente da mudança de status do order_agent, que já é idempotente por
+        # construção comparando o status desejado com o atual. Aqui não há "status atual" para comparar: o
+        # sinal de "isso já aconteceu" é um resgate recente do MESMO cliente para a MESMA recompensa, no
+        # mesmo espírito de `open_review` (idempotente por subject_id+action+status).
+        recent_cutoff = utcnow() - timedelta(seconds=REDEMPTION_IDEMPOTENCY_WINDOW_SECONDS)
+        recent_redemptions = await store.find_many(
+            "redemptions",
+            {"customer_key": customer["customer_key"], "reward": label, "status": "confirmado"},
+            limit=5, sort=[("at", -1)],
+        )
+        duplicate = next((item for item in recent_redemptions if item.get("at") and item["at"] >= recent_cutoff), None)
+        if duplicate:
+            response = (
+                f"Resgate confirmado: **{label}**, {duplicate['points_spent']} pontos debitados "
+                f"(pedido de resgate idêntico já processado há poucos segundos — não debitei de novo)."
+            )
+            event = TimelineEvent(category="agent", title="Resgate de fidelidade (idempotência: repetição recente ignorada)", agent="loyalty_agent", collection="redemptions", op="read", filter=query, result=duplicate, duration_ms=(perf_counter() - started) * 1000)
+            return AgentResult(response, event)
         if clean["points"] < cost:
             faltam = cost - clean["points"]
             acessiveis = [f"**{lbl}** ({price} pontos)" for lbl, price in sorted(REWARD_CATALOG.values(), key=lambda item: item[1]) if clean["points"] >= price]
@@ -424,7 +450,7 @@ async def run_loyalty_agent(store: DataStore, message: str, customer: dict, llm=
         redemption = {"redemption_id": f"RDM-{customer['customer_key'].upper()}-{int(started)}", "customer_key": customer["customer_key"], "reward": label, "points_spent": cost, "status": "confirmado", "at": utcnow()}
         # Três escritas, uma transação: débito dos pontos, comprovante e decisão. É a mais
         # crítica das quatro — um débito sem comprovante é saldo que sumiu sem explicação.
-        async with store.transaction() as tx:
+        async def _write(tx):
             await store.update_one("loyalty_accounts", query, {"$inc": {"points": -cost}}, session=tx)
             await store.insert_one("redemptions", redemption, session=tx)
             await record_decision(store, build_decision_doc(
@@ -434,6 +460,7 @@ async def run_loyalty_agent(store: DataStore, message: str, customer: dict, llm=
                 reasoning=f"Saldo de {clean['points']} pontos cobre o custo de {cost} de '{label}'.",
                 payload={"reward": label, "points_spent": cost, "balance_after": clean["points"] - cost},
             ), session=tx)
+        await run_in_transaction_with_retry(store, _write)
         response = f"Resgate confirmado: **{label}**, {cost} pontos debitados. Saldo restante: {clean['points'] - cost} pontos."
         event = TimelineEvent(category="agent", title="Resgate de fidelidade confirmado", agent="loyalty_agent", collection="redemptions", op="write", filter=query, result=redemption, duration_ms=(perf_counter() - started) * 1000)
         return AgentResult(response, event)
@@ -486,7 +513,7 @@ async def run_logistics_agent(store: DataStore, message: str, customer: dict, ll
     if wants_reschedule and clean["current_location"] != "Entregue":
         # escrita restrita: só um campo de sinalização, nunca a transportadora/prazo real — quem confirma
         # a nova data é a transportadora, o sistema só registra o pedido de reagendamento.
-        async with store.transaction() as tx:
+        async def _write(tx):
             await store.update_one("shipments", query, {"$set": {"reschedule_requested": True}}, session=tx)
             await record_decision(store, build_decision_doc(
                 action="shipment_reschedule", subject_id=clean.get("order_id", ""),
@@ -495,6 +522,7 @@ async def run_logistics_agent(store: DataStore, message: str, customer: dict, ll
                 reasoning="Cliente pediu reagendamento da entrega.",
                 payload={"carrier": clean.get("carrier"), "tracking_code": clean.get("tracking_code")},
             ), session=tx)
+        await run_in_transaction_with_retry(store, _write)
         response = f"Reagendamento solicitado para o pedido {clean['order_id']}. A transportadora **{clean['carrier']}** vai confirmar uma nova janela de entrega em até 24h."
         event = TimelineEvent(category="agent", title="Reagendamento de entrega solicitado", agent="logistics_agent", collection="shipments", op="write", filter=query, result={**clean, "reschedule_requested": True}, duration_ms=(perf_counter() - started) * 1000)
         if wants_final_order_confirmation and order_already_ran:
@@ -721,7 +749,7 @@ async def run_support_agent(store: DataStore, message: str, customer: dict, llm=
         # KB sem evidência confiável (ou pedido explícito de escalonar): abre chamado real em vez de deixar
         # o cliente sem próximo passo — mais uma ação de escrita além do write único do order_agent.
         ticket = {"ticket_id": f"TCK-{customer['customer_key'].upper()}-{int(started * 1000) % 100000}", "customer_key": customer["customer_key"], "area": customer["area"], "subject": message[:200], "status": "aberto", "created_at": utcnow()}
-        async with store.transaction() as tx:
+        async def _write(tx):
             await store.insert_one("support_tickets", ticket, session=tx)
             await record_decision(store, build_decision_doc(
                 action="support_ticket_open", subject_id=ticket["ticket_id"],
@@ -730,6 +758,7 @@ async def run_support_agent(store: DataStore, message: str, customer: dict, llm=
                 reasoning="Cliente pediu explicitamente atendimento humano.",
                 payload={"subject": ticket["subject"], "area": ticket["area"]},
             ), severity="warning", session=tx)
+        await run_in_transaction_with_retry(store, _write)
         final_response += f"\n\nAbri o chamado **{ticket['ticket_id']}** para acompanhamento humano — nosso time entra em contato em até 24h."
         extra_events.append(TimelineEvent(category="agent", title="Chamado de suporte aberto", agent="support_agent", collection="support_tickets", op="write", result=ticket))
 

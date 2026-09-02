@@ -44,6 +44,15 @@ FALLBACK_AGENTS = {
 }
 
 
+# Agentes cujo runner pode escrever (resgate, mudança de status, reagendamento, chamado). O registry
+# inteiro é montado uma única vez no início de run_turn; se um destes for desativado via
+# PATCH /api/admin/agents enquanto um turno com handoffs em cadeia já está em andamento, a versão em
+# memória carregada no início não vê a mudança. Para estes agentes, uma checagem extra direto no
+# banco roda imediatamente antes de cada runner() no loop de handoff — os agentes só de leitura
+# seguem confiando no registry do início do turno, que é onde o custo da consulta extra compensa.
+WRITE_EFFECT_AGENTS = {"loyalty_agent", "order_agent", "logistics_agent", "support_agent"}
+
+
 TOPIC_BY_AGENT = {
     # Tema que cada agente já cobriu no turno: sugerir de volta exatamente o que o
     # cliente acabou de perguntar é pior que não sugerir nada.
@@ -225,7 +234,7 @@ class OrchestrationService:
                 timeline=cascade.timeline or [],   # já vem como dict do documento cacheado
                 active_agent=cached_active_agent,
             )
-            await self._update_conversation(conversation_id, customer, conversation, masked, response, cached_active_agent, [], cached_timeline)
+            await self._update_conversation(conversation_id, customer, masked, response, cached_active_agent, [], cached_timeline)
             await self._persist_trace(conversation_id, customer, masked, response, cached_timeline, cached_active_agent, {})
             await _record_collection_metrics(cached_timeline)
             return ChatResponse(conversation_id=conversation_id, response=response, active_agent=cached_active_agent, route_source=route_source, cache_hit=True, cache_source=cascade.fonte, tokens_economizados=cascade.tokens_economizados, timeline=cached_timeline, usage={}, suggestions=await _next_steps(self.store, customer, covered={TOPIC_BY_AGENT.get(cached_active_agent, "")}))
@@ -256,6 +265,19 @@ class OrchestrationService:
             runner = RUNNERS.get(current)
             if not runner:
                 break
+            if current in WRITE_EFFECT_AGENTS and hop > 0:
+                # O registry do início do turno pode estar velho pelo tempo em que a cadeia chega
+                # aqui — só importa para quem escreve: um agente de leitura desativado no meio do
+                # turno no pior caso devolve uma resposta um pouco atrasada, mas um agente de
+                # escrita desativado não pode processar resgate/status/reagendamento/chamado com
+                # uma flag `active` que já não é mais verdade no banco.
+                live_agent = await self.store.find_one("agent_registry", {"agent_key": current}, brain=True)
+                if not live_agent or not live_agent.get("active", False):
+                    responses.append(
+                        f"O agente de destino ({current}) foi desativado durante o atendimento; "
+                        "mantive a orientação já disponível sem processar esta etapa."
+                    )
+                    break
             await metrics.increment(f"agent.{current}.turns")
             turn_context = {
                 "conversation_id": conversation_id,
@@ -329,7 +351,7 @@ class OrchestrationService:
         )
         await cascade_store_episode(self.store, customer_key=customer["customer_key"], message=masked, answer=response)
         timeline.append(TimelineEvent(category="memory", title="Episódio gravado em memória de longo prazo", agent=current, collection="long_term_memory", op="write", filter={"customer_key": customer["customer_key"]}, result={}))
-        await self._update_conversation(conversation_id, customer, conversation, masked, response, current, handoff_chain, timeline)
+        await self._update_conversation(conversation_id, customer, masked, response, current, handoff_chain, timeline)
         usage = {**budget.used_by_agent, "total": budget.total_used, "cache_read": budget.cache_read_tokens, "cache_write": budget.cache_write_tokens}
         await metrics.increment("tokens.total", budget.total_used)
         await metrics.increment("cache.misses")
@@ -351,7 +373,7 @@ class OrchestrationService:
             cached_active_agent = cascade.active_agent or fanout_key
             cached_timeline = timeline + [TimelineEvent(**event) for event in cascade.timeline]
             log_cache_decision(conversation_id=conversation_id, customer_key=customer["customer_key"], message=masked, cache="hit", fonte=cascade.fonte, score=cascade.score, tokens_economizados=cascade.tokens_economizados, memorias_recuperadas=0, response=response)
-            await self._update_conversation(conversation_id, customer, conversation, masked, response, cached_active_agent, [], cached_timeline)
+            await self._update_conversation(conversation_id, customer, masked, response, cached_active_agent, [], cached_timeline)
             await self._persist_trace(conversation_id, customer, masked, response, cached_timeline, cached_active_agent, {})
             await _record_collection_metrics(cached_timeline)
             return ChatResponse(conversation_id=conversation_id, response=response, active_agent=cached_active_agent, route_source="fanout", cache_hit=True, cache_source=cascade.fonte, tokens_economizados=cascade.tokens_economizados, timeline=cached_timeline, usage={}, suggestions=await _next_steps(self.store, customer, covered={"order", "invoice"}))
@@ -386,7 +408,7 @@ class OrchestrationService:
             response = "A resposta foi retida pela política de segurança."
         current = fanout_key
         await cascade_store_turn(self.store, target=fanout_key, area=customer["area"], customer_key=customer["customer_key"], session_id=conversation_id, intent=None, message=masked, answer=response, timeline=[event.model_dump(mode="json") for event in timeline[tail_start:]], active_agent=current)
-        await self._update_conversation(conversation_id, customer, conversation, masked, response, current, [], timeline)
+        await self._update_conversation(conversation_id, customer, masked, response, current, [], timeline)
         usage = {**budget.used_by_agent, "total": budget.total_used, "cache_read": budget.cache_read_tokens, "cache_write": budget.cache_write_tokens}
         await metrics.increment("tokens.total", budget.total_used)
         await metrics.increment("fanout.turns")
@@ -397,25 +419,49 @@ class OrchestrationService:
         suggestions = await _next_steps(self.store, customer, covered={"order", "invoice"})
         return ChatResponse(conversation_id=conversation_id, response=response, active_agent=current, route_source="fanout", cache_hit=False, cache_source=None, tokens_economizados=0, timeline=timeline, usage=usage, suggestions=suggestions)
 
-    async def _update_conversation(self, conversation_id: str, customer: dict, existing: dict | None, message: str, response: str, active_agent: str, handoffs: list[dict], timeline: list[TimelineEvent] | None = None) -> None:
-        turns = list((existing or {}).get("turns", []))[-18:]
-        turns.extend([{"role": "user", "content": message, "at": utcnow()}, {"role": "assistant", "content": response, "at": utcnow()}])
-        chain = list((existing or {}).get("handoff_chain", []))[-18:] + [{key: value for key, value in item.items() if key != "conversation_id"} for item in handoffs]
-        # "pedido/fatura ativo": último order_id/invoice_id que um agente de fato tocou neste turno — é o que
-        # order_agent/billing_agent/warranty_agent/logistics_agent usam como contexto no PRÓXIMO turno quando
-        # a mensagem não cita um PED-/FAT- explícito. Checa por chave no result, não por nome de collection —
-        # warranty_agent grava em warranty_policies e logistics_agent em shipments, ambos carregando order_id.
-        active_order_id = (existing or {}).get("active_order_id")
-        active_invoice_id = (existing or {}).get("active_invoice_id")
+    async def _update_conversation(self, conversation_id: str, customer: dict, message: str, response: str, active_agent: str, handoffs: list[dict], timeline: list[TimelineEvent] | None = None) -> None:
+        """Aplica só o DELTA deste turno via `update_one` atômico — nunca reescreve o documento inteiro.
+
+        Antes disto, o turno lia `agent_conversations` uma única vez no início de `run_turn` e, no
+        fim, fazia `replace_one` do documento inteiro reconstruído em memória. Dois turnos
+        concorrentes na MESMA `conversation_id` (double-click do usuário, retry de rede sobrepondo a
+        request original em voo sob timeout do LLM) liam o mesmo estado inicial; o `replace_one` que
+        terminasse por último sobrescrevia o documento inteiro e apagava a mensagem do turno que
+        terminou primeiro — um lost update clássico. `$push`/`$each`/`$slice` fazem o histórico
+        crescer por append no servidor, então a ordem de chegada dos dois turnos não importa: os dois
+        acabam presentes, na ordem em que cada um efetivamente terminou.
+        """
+        now = utcnow()
+        turn_entries = [{"role": "user", "content": message, "at": now}, {"role": "assistant", "content": response, "at": now}]
+        handoff_entries = [{key: value for key, value in item.items() if key != "conversation_id"} for item in handoffs]
+
+        # "pedido/fatura ativo": último order_id/invoice_id que um agente de fato tocou NESTE turno — é
+        # o que order_agent/billing_agent/warranty_agent/logistics_agent usam como contexto no PRÓXIMO
+        # turno quando a mensagem não cita um PED-/FAT- explícito. Só entra no $set quando este turno
+        # de fato produziu um valor: sem isso, dois turnos concorrentes (um que toca pedido, outro que
+        # não) poderiam fazer o que não tocou nada sobrescrever o campo com um valor antigo por engano
+        # — aqui ele simplesmente não menciona o campo, e o servidor preserva o que já estava lá.
+        set_fields: dict = {"active_agent": active_agent, "updated_at": now}
         for event in timeline or []:
             if isinstance(event.result, dict) and event.result.get("order_id"):
-                active_order_id = event.result["order_id"]
+                set_fields["active_order_id"] = event.result["order_id"]
             if isinstance(event.result, dict) and event.result.get("invoice_id"):
-                active_invoice_id = event.result["invoice_id"]
-        await self.store.replace_one(
+                set_fields["active_invoice_id"] = event.result["invoice_id"]
+
+        update: dict = {
+            "$setOnInsert": {"conversation_id": conversation_id, "customer_key": customer["customer_key"]},
+            "$set": set_fields,
+            # -20: mesmo teto de antes (20 mensagens / handoffs), agora aplicado pelo próprio
+            # servidor a cada append, nunca por um recorte feito em memória sobre um snapshot velho.
+            "$push": {"turns": {"$each": turn_entries, "$slice": -20}},
+        }
+        if handoff_entries:
+            update["$push"]["handoff_chain"] = {"$each": handoff_entries, "$slice": -20}
+
+        await self.store.update_one(
             "agent_conversations",
             {"conversation_id": conversation_id, "customer_key": customer["customer_key"]},
-            {"conversation_id": conversation_id, "customer_key": customer["customer_key"], "turns": turns, "active_agent": active_agent, "handoff_chain": chain[-20:], "active_order_id": active_order_id, "active_invoice_id": active_invoice_id, "updated_at": utcnow()},
+            update,
             upsert=True,
         )
 

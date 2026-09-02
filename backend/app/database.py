@@ -5,7 +5,7 @@ import re
 from collections import defaultdict, deque
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Awaitable, Callable, TypeVar
 
 from pymongo import ASCENDING, AsyncMongoClient
 
@@ -84,6 +84,37 @@ def is_transient_transaction_error(exc: BaseException) -> bool:
 def _driver_session(session):
     """Desembrulha o handle para o que o pymongo espera receber em `session=`."""
     return session.driver_session if isinstance(session, Transaction) else session
+
+
+_T = TypeVar("_T")
+
+RETRY_MAX_ATTEMPTS = 3
+
+
+async def run_in_transaction_with_retry(
+    store: "DataStore", body: Callable[["Transaction"], Awaitable[_T]], *, max_attempts: int = RETRY_MAX_ATTEMPTS,
+) -> _T:
+    """Roda `body(tx)` dentro de `store.transaction()`, repetindo em `TransientTransactionError`.
+
+    Extraído do padrão que `reviews.py:resolve_review` já usava sozinho: duas transações mexendo no
+    MESMO documento (ex. duplo clique em "resgatar pontos") produzem `WriteConflict`/
+    `TransientTransactionError` — que significa "tente de novo", não "deu errado". Sem repetir,
+    isso sobe cru até o handler genérico de erro e vira um HTTP 500 em vez de simplesmente
+    convergir na segunda tentativa. `body` deve ser idempotente o bastante para rodar mais de uma
+    vez (ela recebe uma transação NOVA a cada tentativa — nunca reaproveita uma sessão abortada).
+    """
+    last_exc: BaseException | None = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            async with store.transaction() as tx:
+                return await body(tx)
+        except Exception as exc:
+            last_exc = exc
+            if not is_transient_transaction_error(exc) or attempt == max_attempts:
+                raise
+            logger.info("conflito transitório na transação (tentativa %d) — repetindo", attempt)
+            await asyncio.sleep(0.05 * attempt)
+    raise last_exc  # pragma: no cover — inalcançável: o loop sempre raise/retorna antes
 
 
 class DataStore:
@@ -255,17 +286,31 @@ class DataStore:
         async with self._lock:
             bucket = self._bucket(name, brain)
             target = next((item for item in bucket if _matches(item, query)), None)
+            was_insert = target is None
             if target is None and upsert:
                 target = {**query, "_id": f"{name}-{len(bucket) + 1}"}
                 bucket.append(target)
             if target is None:
                 return 0
+            if was_insert:
+                for key, value in update.get("$setOnInsert", {}).items():
+                    target.setdefault(key, copy.deepcopy(value))
             for key, value in update.get("$set", {}).items():
                 target[key] = copy.deepcopy(value)
             for key, value in update.get("$inc", {}).items():
                 target[key] = target.get(key, 0) + value
             for key, value in update.get("$push", {}).items():
-                target.setdefault(key, []).append(copy.deepcopy(value))
+                array = target.setdefault(key, [])
+                if isinstance(value, dict) and "$each" in value:
+                    # Emula o $push com $each/$slice do driver real: append de vários itens
+                    # de uma vez seguido de um corte para o final do array (slice negativo é o
+                    # único caso que o orchestration.py usa, para limitar o tamanho do histórico).
+                    array.extend(copy.deepcopy(item) for item in value["$each"])
+                    slice_spec = value.get("$slice")
+                    if isinstance(slice_spec, int):
+                        target[key] = array[slice_spec:] if slice_spec < 0 else array[:slice_spec]
+                else:
+                    array.append(copy.deepcopy(value))
             return 1
 
     async def aggregate(self, name: str, pipeline: list[dict], *, brain: bool = False) -> list[dict]:
