@@ -1,5 +1,7 @@
 # Multi-Agent on MongoDB
 
+[![CI](https://github.com/adrianofratelli-glitch/MultiAgent-on-MDB/actions/workflows/ci.yml/badge.svg)](https://github.com/adrianofratelli-glitch/MultiAgent-on-MDB/actions/workflows/ci.yml)
+
 8 customer-service agents that coordinate through MongoDB Atlas — no queue, no Redis, no separate vector store. Routing rules, agent configs, memory, cache, handoffs and guardrail decisions are all documents you can query while the conversation is running.
 
 ## The demo in 5 steps
@@ -67,6 +69,11 @@ pytest -q                       # unit
 python tests/smoke.py <url>     # black-box
 python eval.py <url>            # golden dataset, results to eval_runs
 ```
+
+Every pull request runs the backend test suite and Ruff checks, plus a clean
+frontend production build and dependency audit. CI uses the deterministic
+in-memory data-store implementation and does not require Atlas or Anthropic
+credentials.
 
 ## Docs
 
