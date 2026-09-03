@@ -3,6 +3,10 @@ from dataclasses import dataclass
 from .database import DataStore, utcnow
 from .router import normalize
 
+import logging
+
+logger = logging.getLogger("multiagent.guardrails")
+
 
 @dataclass(frozen=True)
 class GuardrailResult:
@@ -165,10 +169,37 @@ async def check_input(store: DataStore, message: str, customer: dict, llm=None, 
     return GuardrailResult(False, score=best_score)
 
 
+# Marcadores que a máscara de PII deixa no texto. Frase feita só disso não é ataque:
+# é cliente colando o próprio documento — comportamento ingênuo, não malicioso.
+_PII_PLACEHOLDERS = ("[cpf]", "[cartao]", "[cartão]", "[email]", "[telefone]")
+
+
+def _is_pii_only(phrase: str) -> bool:
+    """A frase é essencialmente PII mascarada, sem intenção de ataque?"""
+    if not any(tag in phrase for tag in _PII_PLACEHOLDERS):
+        return False
+    # remove os marcadores e o vocabulário neutro que costuma acompanhá-los; o que sobra
+    # é o que carregaria a intenção. Quase nada sobrando => não é ataque.
+    resto = phrase
+    for tag in _PII_PLACEHOLDERS:
+        resto = resto.replace(tag, " ")
+    neutro = {"meu", "minha", "e", "o", "a", "de", "do", "da", "eh", "sou", "aqui",
+              "esta", "esse", "este", "cpf", "cartao", "email", "telefone", "numero"}
+    restantes = [w for w in resto.split() if w not in neutro]
+    return len(restantes) <= 2
+
+
 async def _reinforce_denylist(store: DataStore, message: str, reason: str) -> None:
     """Loop de reforço: um ataque novo pego pelo classificador vira frase determinística — não paga custo de LLM de novo."""
     phrase = " ".join(normalize(message).split()[:8])
     if not phrase:
+        return
+    if _is_pii_only(phrase):
+        # Não envenena a denylist com dado do cliente. Sem esta guarda, o primeiro cliente
+        # que colou CPF+cartão ensinou o sistema a BLOQUEAR qualquer outro que fizesse o
+        # mesmo — com a mensagem "você violou a política de segurança", que culpa quem só
+        # foi ingênuo. A PII já é mascarada antes de chegar ao LLM; não precisa virar regra.
+        logger.info("reforço ignorado: frase é apenas PII mascarada, não ataque")
         return
     await store.replace_one(
         "guardrail_denylist",

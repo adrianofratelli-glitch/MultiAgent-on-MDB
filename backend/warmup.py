@@ -1,9 +1,7 @@
-"""Pré-aquece o cache semântico com as perguntas do roteiro de demo, ANTES da reunião com o cliente.
+"""Executa os candidatos de warmup e confirma quais entraram no cache semântico.
 
-Isso é aquecimento de verdade: cada chamada aqui consome tokens reais do Claude, uma vez. Depois, quando
-o cliente clicar no mesmo atalho ao vivo, a resposta vem do semantic_cache (cache_hit: true, visível na UI
-sem nenhum disfarce) — sem inventar consumo de LLM que não aconteceu. Guardrail nunca é cacheado (o turno
-é interrompido antes do cache), então perguntas de guardrail não entram aqui — não têm o que aquecer.
+Cada chamada consome tokens reais do Claude. Apenas respostas aprovadas pela política stable_v1 ficam
+disponíveis entre conversas; o relatório final explicita candidatos não elegíveis em vez de prometer HIT.
 
 Uso: python warmup.py [URL]
 """
@@ -16,6 +14,7 @@ import httpx
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from app.seed_data import DEMO_SCENARIOS  # noqa: E402
+from app.router import normalize  # noqa: E402
 
 
 BASE = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8031"
@@ -41,6 +40,8 @@ def token(client: httpx.Client, customer_key: str) -> str:
 def main() -> None:
     total = sum(len(prompts) for prompts in WARM_PROMPTS.values())
     done = 0
+    ready = 0
+    skipped = 0
     with httpx.Client(base_url=BASE, timeout=120) as client:
         for customer_key, prompts in WARM_PROMPTS.items():
             headers = {"Authorization": f"Bearer {token(client, customer_key)}"}
@@ -49,9 +50,18 @@ def main() -> None:
                 response.raise_for_status()
                 body = response.json()
                 done += 1
-                mark = "(já em cache)" if body["cache_hit"] else "(aquecido agora)"
+                cache_response = client.get("/api/inspector/cache", headers=headers)
+                cache_response.raise_for_status()
+                cache_items = cache_response.json().get("items", [])
+                stored = any(item.get("question_norm") == normalize(message) for item in cache_items)
+                if body["cache_hit"] or stored:
+                    ready += 1
+                    mark = "(já em cache)" if body["cache_hit"] else "(aquecido agora · stable_v1)"
+                else:
+                    skipped += 1
+                    mark = "(executado · não elegível para cache)"
                 print(f"[{done}/{total}] {customer_key}: {mark} — {message[:60]}...")
-    print(f"\nPronto. {total} atalhos de demo pré-aquecidos — o primeiro clique ao vivo do cliente vem do cache.")
+    print(f"\nPronto. {ready} candidato(s) disponível(is) no cache; {skipped} mantido(s) fora pela política stable_v1.")
 
 
 if __name__ == "__main__":

@@ -1,15 +1,16 @@
 import { useEffect, useMemo, useState } from 'react';
 import { api } from './api.js';
-import AiBrainInspector, { AiBrainHighlights } from './components/AiBrainPanel.jsx';
-import Inspector from './components/Inspector.jsx';
 import Timeline from './components/Timeline.jsx';
+import ReplacementChain from './components/ReplacementChain.jsx';
+import CompliancePage from './components/CompliancePage.jsx';
 
-const NAV = ['Chat', 'Agentes', 'Guardrails', 'Métricas'];
-const OP_LABELS = { read: 'leitura', write: 'escrita', vectorSearch: '$vectorSearch', hybridSearch: 'BM25 + vetor (RRF)', changeStream: 'change stream' };
+const NAV = ['Chat', 'Decisões'];
+// O rótulo do híbrido não cita mais o RRF na aplicação: a fusão passou a rodar server-side
+// com $rankFusion, e o título do evento diz qual dos dois caminhos rodou de fato.
+const OP_LABELS = { read: 'leitura', write: 'escrita', vectorSearch: '$vectorSearch', hybridSearch: 'híbrido BM25 + vetor', changeStream: 'change stream', graphLookup: '$graphLookup' };
 const IDENTITIES = ['ana', 'bruno', 'carla', 'diego'];
 
-function ChatPanel({ messages, input, setInput, send, busy, customerName, demos }) {
-  const [selectedScenario, setSelectedScenario] = useState(null);
+function ChatPanel({ messages, input, setInput, send, busy, customerName, demos, suggestions, onSuggestion }) {
   return (
     <section className="chat-panel">
       <div className="panel-label">canal do cliente</div>
@@ -22,15 +23,25 @@ function ChatPanel({ messages, input, setInput, send, busy, customerName, demos 
             <small>{message.role === 'user' ? 'você' : message.agent || 'assistente'}</small>
             {message.role === 'assistant' && (
               <span className={`cache-badge ${message.cacheHit ? 'hit' : 'miss'}`}>
-                {message.cacheHit
-                  ? `⚡ HIT (${message.cacheSource === 'curto_prazo' ? 'sessão atual' : 'cache global'}) — 0 tokens`
-                  : `🔄 MISS — ${message.tokens ?? 0} tokens, contexto de longo prazo usado: ${message.longTermUsed ? 'sim' : 'não'}`}
+                {message.cacheHit ? '⚡ cache hit · 0 tokens' : `cache miss · ${message.tokens ?? 0} tokens`}
               </span>
             )}
             <div>{message.text}</div>
           </div>
         ))}
       </div>
+      {suggestions?.length > 0 && !busy && (
+        /* Próximos passos derivados de query: cada chip carrega a mensagem exata que
+           dispara, então clicar sempre resolve — nunca leva a um "não encontrei". */
+        <div className="suggestions" aria-label="Próximos passos sugeridos">
+          <span className="suggestions-label">posso seguir com</span>
+          {suggestions.map((item) => (
+            <button type="button" className="suggestion-chip" key={item.topic + item.label} onClick={() => onSuggestion(item.message)}>
+              {item.label}
+            </button>
+          ))}
+        </div>
+      )}
       <form className="chat-form" onSubmit={(event) => { event.preventDefault(); send(); }}>
         <textarea value={input} onChange={(event) => setInput(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); send(); } }} placeholder="Digite sua solicitação… (Enter envia, Shift+Enter quebra linha)" rows="3" />
         <button className="send-button" disabled={busy || !input.trim()}>{busy ? 'Coordenando…' : 'Enviar turno'}<span>↗</span></button>
@@ -41,18 +52,11 @@ function ChatPanel({ messages, input, setInput, send, busy, customerName, demos 
           const demo = demos[Number(event.target.value)];
           if (demo) {
             setInput(demo.message);
-            setSelectedScenario(demo);
           }
         }}>
           <option value="">Carregar um cenário de demonstração…</option>
           {demos.map((demo, index) => <option key={demo.scenario_id} value={index}>{demo.label}</option>)}
         </select>
-        {selectedScenario && (
-          <div className="scenario-proof">
-            <span>o que este cenário prova</span>
-            <div>{selectedScenario.capabilities.map((capability) => <code key={capability}>{capability}</code>)}</div>
-          </div>
-        )}
       </label>
     </section>
   );
@@ -67,7 +71,7 @@ function AgentsPage({ agents, adminMode, setAdminMode, reload }) {
   return (
     <section className="full-page-section">
       <div className="section-copy">
-        <span className="eyebrow">ai_brain.agent_registry</span><h2>O time de agentes é uma collection.</h2>
+        <span className="eyebrow">multiagent_brain.agent_registry</span><h2>O time de agentes é uma collection.</h2>
         <p>Modelo, persona, ferramentas e budget mudam por documento — sem deploy. {agents.length} agentes reais, todos respondem de fato — nenhum documento de enfeite.</p>
         <label className="admin-toggle">
           <input type="checkbox" checked={adminMode} onChange={(event) => setAdminMode(event.target.checked)} />
@@ -107,14 +111,14 @@ function MetricsPage({ metrics, evalRuns, adminMode }) {
     .filter(([key]) => key.startsWith('collection.') && key.endsWith('.write') && businessCollections.has(key.slice('collection.'.length, -'.write'.length)))
     .reduce((sum, [, value]) => sum + value, 0);
   const nativeSearches = Object.entries(counters)
-    .filter(([key]) => key.startsWith('collection.') && (key.endsWith('.vectorSearch') || key.endsWith('.hybridSearch')))
+    .filter(([key]) => key.startsWith('collection.') && (key.endsWith('.vectorSearch') || key.endsWith('.hybridSearch') || key.endsWith('.graphLookup')))
     .reduce((sum, [, value]) => sum + value, 0);
   const collectionRows = Object.entries(counters).reduce((rows, [key, value]) => {
     if (!key.startsWith('collection.')) return rows;
     const parts = key.slice('collection.'.length).split('.');
     const op = parts.pop();
     const collection = parts.join('.');
-    const row = rows.get(collection) || { collection, read: 0, write: 0, vectorSearch: 0, hybridSearch: 0, changeStream: 0 };
+    const row = rows.get(collection) || { collection, read: 0, write: 0, vectorSearch: 0, hybridSearch: 0, changeStream: 0, graphLookup: 0 };
     row[op] = value;
     rows.set(collection, row);
     return rows;
@@ -124,7 +128,7 @@ function MetricsPage({ metrics, evalRuns, adminMode }) {
     ['agentes exercitados', `${specialistAgents}/7`, 'especialistas com atuação real'],
     ['handoffs', handoffCount, `${counters['coordination.revisits'] || 0} retornos controlados`],
     ['escritas de negócio', businessWrites, 'orders · tickets · resgates · entregas'],
-    ['buscas nativas', nativeSearches, 'Vector Search + híbrida RRF'],
+    ['operações nativas', nativeSearches, 'Vector Search · $rankFusion · $graphLookup'],
     ['latência p95', route.p95_ms ? `${Math.round(route.p95_ms)} ms` : '—', `${route.count || 0} amostras`],
     ['cache hit rate', cacheTotal ? `${Math.round((cacheHits / cacheTotal) * 100)}%` : '—', `${cacheHits} hits · ${cacheMisses} misses`],
     ['tokens economizados', (counters['tokens.economizados'] || 0).toLocaleString('pt-BR'), 'estimados, evitados por HIT na cascata'],
@@ -145,13 +149,13 @@ function MetricsPage({ metrics, evalRuns, adminMode }) {
         <div className="panel-label"><span>coleções em operação</span><code>collection.*</code></div>
         {collectionRows.size === 0
           ? <p className="metric-empty">Execute um cenário no Chat para materializar leituras, escritas e buscas.</p>
-          : <div className="metric-table-wrap"><table><thead><tr><th>collection</th><th>read</th><th>write</th><th>vector</th><th>hybrid</th></tr></thead><tbody>
-            {[...collectionRows.values()].sort((a, b) => a.collection.localeCompare(b.collection)).map((row) => <tr key={row.collection}><td><code>{row.collection}</code></td><td>{row.read}</td><td className={row.write ? 'hot' : ''}>{row.write}</td><td>{row.vectorSearch}</td><td>{row.hybridSearch}</td></tr>)}
+          : <div className="metric-table-wrap"><table><thead><tr><th>collection</th><th>read</th><th>write</th><th>vector</th><th>hybrid</th><th>graph</th></tr></thead><tbody>
+            {[...collectionRows.values()].sort((a, b) => a.collection.localeCompare(b.collection)).map((row) => <tr key={row.collection}><td><code>{row.collection}</code></td><td>{row.read}</td><td className={row.write ? 'hot' : ''}>{row.write}</td><td>{row.vectorSearch}</td><td>{row.hybridSearch}</td><td className={row.graphLookup ? 'hot' : ''}>{row.graphLookup}</td></tr>)}
           </tbody></table></div>}
       </div>
       <div className="eval-panel">
         <div className="panel-label"><span>qualidade · GoalSuccessRate</span><code>eval_runs</code></div>
-        {!adminMode && <p className="metric-empty">Ative o modo admin em Agentes para consultar o histórico de avaliação.</p>}
+        {!adminMode && <p className="metric-empty">Ligue o modo admin na aba Decisões para consultar o histórico de avaliação.</p>}
         {adminMode && !evalRuns.length && <p className="metric-empty">Nenhuma execução registrada. Rode <code>python eval.py</code> no backend.</p>}
         {adminMode && evalRuns.map((run) => (
           <div className="eval-run" key={run.at}>
@@ -168,7 +172,6 @@ function MetricsPage({ metrics, evalRuns, adminMode }) {
 
 export default function App() {
   const [nav, setNav] = useState('Chat');
-  const [inspector, setInspector] = useState('agents');
   const [health, setHealth] = useState(null);
   const [customer, setCustomer] = useState(null);
   const [agents, setAgents] = useState([]);
@@ -184,23 +187,27 @@ export default function App() {
   const [error, setError] = useState('');
   const [conversationId, setConversationId] = useState(null);
   const [lastRun, setLastRun] = useState(null);
+  const [suggestions, setSuggestions] = useState([]);
   const [adminMode, setAdminMode] = useState(false);
-  const [liveEvents, setLiveEvents] = useState([]);
-  const [liveOn, setLiveOn] = useState(false);
+  const [liveStatus, setLiveStatus] = useState('connecting');
+  const [liveError, setLiveError] = useState('');
   const [evalRuns, setEvalRuns] = useState([]);
 
   const loadCore = async () => {
     const [h, a] = await Promise.all([api.health(), api.agents()]);
     setHealth(h); setAgents(a);
   };
-  const switchIdentity = async (customerKey) => {
+  // o boot abre sempre em conversa nova: uma demo que começa com o histórico do ensaio anterior
+  // na tela parece que o cliente já falou com o agente. a retomada continua valendo ao trocar de
+  // identidade no meio da sessão, que é quando ela realmente evita um painel vazio.
+  const switchIdentity = async (customerKey, { resume = true } = {}) => {
     try {
       const who = await api.login(customerKey); setCustomer(who); await loadCore();
       const [mem, gr, met, lastConv, scenarios] = await Promise.all([api.memory(who.customer_key), api.guardrails('events'), api.metrics(), api.latestConversation(), api.demoScenarios()]);
       setMemory(mem); setGuardrails(gr); setMetrics(met);
       setDemoScenarios(scenarios);
       setHandoffs([]);
-      if (lastConv?.turns?.length) {
+      if (resume && lastConv?.turns?.length) {
         setConversationId(lastConv.conversation_id);
         setMessages(lastConv.turns.map((turn) => ({ role: turn.role, agent: lastConv.active_agent, text: turn.content })));
         // sem isso a conversa retomada mostra o texto certo mas raio-x/esteira vazios — parece que o
@@ -208,11 +215,11 @@ export default function App() {
         setTimeline(lastConv.last_timeline || []);
         setLastRun(lastConv.last_timeline ? { active_agent: lastConv.active_agent, usage: lastConv.last_usage || {} } : null);
       } else {
-        setConversationId(null); setMessages([]); setTimeline([]); setLastRun(null);
+        setConversationId(null); setMessages([]); setTimeline([]); setLastRun(null); setSuggestions([]);
       }
     } catch (err) { setError(err.message); }
   };
-  useEffect(() => { switchIdentity('ana'); }, []);
+  useEffect(() => { switchIdentity('ana', { resume: false }); }, []);
 
   useEffect(() => {
     if (nav === 'Métricas' && adminMode) {
@@ -222,38 +229,62 @@ export default function App() {
 
   useEffect(() => {
     if (!customer) return undefined;
-    const controller = new AbortController();
     let cancelled = false;
-    const connect = async () => {
-      while (!cancelled && !controller.signal.aborted) {
+    let controller = null;
+    let running = false;
+    const connect = async (activeController) => {
+      running = true;
+      while (!cancelled && !activeController.signal.aborted) {
         try {
-          setLiveOn(true);
-          await api.streamEvents((event) => {
-            setLiveEvents([{ ...event, receivedAt: Date.now() }]);
-          }, controller.signal);
+          setLiveStatus('connecting');
+          await api.streamEvents(() => {}, activeController.signal, () => {
+            setLiveStatus('live');
+            setLiveError('');
+          });
         } catch (err) {
-          // conexão caiu (servidor reiniciou, rede oscilou) — reconecta em vez de ficar "offline" pra sempre
+          if (!activeController.signal.aborted) setLiveError(err.message || 'Conexão encerrada');
         }
-        setLiveOn(false);
-        if (!cancelled && !controller.signal.aborted) await new Promise((resolve) => setTimeout(resolve, 3000));
+        if (!cancelled && !activeController.signal.aborted) setLiveStatus('offline');
+        if (!cancelled && !activeController.signal.aborted) await new Promise((resolve) => setTimeout(resolve, 3000));
+      }
+      running = false;
+      if (!cancelled && document.visibilityState === 'visible') {
+        setTimeout(syncConnection, 0);
       }
     };
-    connect();
-    return () => { cancelled = true; controller.abort(); setLiveOn(false); };
+    const syncConnection = () => {
+      if (document.visibilityState === 'visible') {
+        if (running) return;
+        controller = new AbortController();
+        connect(controller);
+      } else {
+        controller?.abort();
+        controller = null;
+        setLiveStatus('offline');
+      }
+    };
+    syncConnection();
+    document.addEventListener('visibilitychange', syncConnection);
+    return () => {
+      cancelled = true;
+      controller?.abort();
+      document.removeEventListener('visibilitychange', syncConnection);
+    };
   }, [customer?.customer_key]);
 
   const newConversation = () => {
-    setConversationId(null); setMessages([]); setTimeline([]); setLastRun(null); setHandoffs([]); setInput('');
-    setGuardrails([]); setMetrics({}); setLiveEvents([]);
+    setConversationId(null); setMessages([]); setTimeline([]); setLastRun(null); setHandoffs([]); setInput(''); setSuggestions([]);
+    setGuardrails([]); setMetrics({});
   };
 
-  const send = async () => {
-    if (!input.trim() || busy) return;
-    const value = input.trim(); setInput(''); setBusy(true); setError('');
+  const send = async (override) => {
+    const raw = typeof override === 'string' ? override : input;
+    if (!raw.trim() || busy) return;
+    const value = raw.trim(); setInput(''); setBusy(true); setError(''); setSuggestions([]);
     setMessages((items) => [...items, { role: 'user', text: value }]);
     try {
       const run = await api.chat(value, conversationId);
-      setConversationId(run.conversation_id); setTimeline(run.timeline); setLastRun(run);
+      setConversationId(run.conversation_id); setTimeline(run.timeline); setLastRun(run); setSuggestions(run.suggestions || []);
       const longTermUsed = (run.timeline || []).some((event) => event.collection === 'long_term_memory');
       setMessages((items) => [...items, { role: 'assistant', agent: run.active_agent, text: run.response, cacheHit: run.cache_hit, cacheSource: run.cache_source, tokens: run.usage?.total ?? 0, longTermUsed }]);
       const [hs, met, gr, mem] = await Promise.all([api.handoffs(run.conversation_id), api.metrics(), api.guardrails('events'), api.memory(customer.customer_key)]);
@@ -262,8 +293,6 @@ export default function App() {
     finally { setBusy(false); }
   };
 
-  const stats = useMemo(() => ({ agents: health?.counts?.agents ?? '—', handoffs: handoffs.length, route: lastRun?.route_source ?? '—', tokens: lastRun?.usage?.total ?? 0 }), [health, handoffs, lastRun]);
-
   const agentLabels = useMemo(() => Object.fromEntries(agents.map((agent) => [agent.agent_key, agent.label])), [agents]);
   const cast = useMemo(() => {
     const sequence = (timeline || [])
@@ -271,8 +300,6 @@ export default function App() {
       .map((event) => event.agent);
     return sequence.filter((agent, index) => agent !== sequence[index - 1]);
   }, [timeline]);
-
-  const data = { agents, handoffs, memory, guardrails, metrics, castKeys: cast };
 
   const collectionsTouched = useMemo(() => {
     const byCollection = new Map();
@@ -285,12 +312,13 @@ export default function App() {
   }, [timeline]);
 
   return (
-    <>
-      <nav className="top-nav"><div className="nav-inner"><button className="brand" onClick={() => setNav('Chat')}><span className="leaf">◆</span><span>MongoDB</span><b>Agent Control Plane</b></button><div className="nav-tabs">{NAV.map((item) => <button className={nav === item ? 'active' : ''} key={item} onClick={() => setNav(item)}>{item}</button>)}</div><label className="identity-select">identidade<select value={customer?.customer_key || 'ana'} onChange={(event) => switchIdentity(event.target.value)}>{IDENTITIES.map((key) => <option key={key} value={key}>{key}</option>)}</select></label><div className="live-pill" title="Change Stream do MongoDB Atlas em agent_handoffs"><span className={liveOn ? 'ok' : ''} />{liveOn ? 'ao vivo' : 'offline'}</div><div className="health-pill"><span className={health ? 'ok' : ''} />{health ? `${health.storage} · ok` : 'conectando'}</div></div></nav>
-      <main className="content">
-        {error && <div className="error-banner">{error}<button onClick={() => setError('')}>×</button></div>}
+    <div data-pov-shell>
+      <a className="pov-skip-link" href="#conteudo-principal">Pular para o conteúdo</a>
+      <nav className="top-nav"><div className="nav-inner"><button className="brand" onClick={() => setNav('Chat')} aria-label="Ir para o Chat"><span className="leaf">◆</span><span>MongoDB</span><b>Agent Control Plane</b></button><div className="nav-tabs">{NAV.map((item) => <button className={nav === item ? 'active' : ''} aria-current={nav === item ? 'page' : undefined} key={item} onClick={() => setNav(item)}>{item}</button>)}</div><label className="identity-select">identidade<select value={customer?.customer_key || 'ana'} onChange={(event) => switchIdentity(event.target.value)}>{IDENTITIES.map((key) => <option key={key} value={key}>{key}</option>)}</select></label><div className="live-pill" title={liveError || 'Change Stream do MongoDB Atlas em agent_handoffs'}><span className={liveStatus === 'live' ? 'ok' : liveStatus === 'connecting' ? 'connecting' : ''} />{liveStatus === 'live' ? 'ao vivo' : liveStatus === 'connecting' ? 'conectando' : 'offline'}</div><div className="health-pill"><span className={health ? 'ok' : ''} />{health ? `${health.storage} · ok` : 'conectando'}</div></div></nav>
+      <main id="conteudo-principal" tabIndex={-1} className="content">
+        {error && <div className="error-banner">{error}<button aria-label="Fechar aviso" onClick={() => setError('')}>×</button></div>}
         {nav === 'Chat' && <>
-          <header className="hero"><div><div className="hero-kicker">PoV · arquitetura multi-agente</div><h1>A colaboração é uma <span>query.</span></h1><p>Cada decisão, ferramenta e handoff deixa um documento consultável no MongoDB.</p></div><div className="turn-state"><span>turno atual</span><code>{conversationId || 'aguardando mensagem'}</code><b>{lastRun?.active_agent || '—'}</b><button className="new-conversation-btn" onClick={newConversation} disabled={busy}>+ nova conversa</button></div></header>
+          <header className="stage-header"><div><span>coordenação no Atlas</span><h1>Agentes em ação.</h1></div><div className="turn-state"><code>{conversationId || 'novo turno'}</code><b>{lastRun?.active_agent || 'aguardando'}</b><button className="new-conversation-btn" onClick={newConversation} disabled={busy}>Nova conversa</button></div></header>
           {cast.length > 0 && (
             <div className="agent-cast" title={lastRun?.route_source === 'fanout' ? 'Agentes despachados em paralelo (fan-out), não em cadeia' : 'Agentes que participaram deste turno, em ordem de atuação'}>
               <span className="agent-cast-label">{lastRun?.route_source === 'fanout' ? 'despacho paralelo' : 'agentes em ação'}</span>
@@ -325,29 +353,11 @@ export default function App() {
               </div>
             </div>
           )}
-          <div className="stat-bar"><div><strong>{stats.agents}</strong><span>agentes ativos</span></div><div><strong>{stats.handoffs}</strong><span>handoffs no turno</span></div><div><strong className="small">{stats.route}</strong><span>origem da rota</span></div><div><strong>{stats.tokens}</strong><span>tokens estimados</span></div></div>
-          {liveEvents.length > 0 && (
-            <div className="live-feed">
-              <div className="panel-label"><span>último handoff · agent_handoffs</span><code>change stream</code></div>
-              {liveEvents.map((event, index) => (
-                <div className="live-feed-item" key={`${event.at}-${index}`}>
-                  <span className="teal-dot" />
-                  <b>{event.from_agent}</b> → <b>{event.to_agent}</b>
-                  <small>{event.reason}</small>
-                </div>
-              ))}
-            </div>
-          )}
-          <AiBrainHighlights customer={customer} lastRun={lastRun} timeline={timeline} />
-          <div className="workspace"><ChatPanel key={customer?.customer_key} {...{ messages, input, setInput, send, busy }} customerName={customer?.name} demos={demoScenarios} /><section className="timeline-panel"><div className="panel-label"><span>raio-x do turno</span><code>{timeline.length} eventos</code></div><Timeline events={timeline} /></section><Inspector tab={inspector} {...data} /></div>
-          <div className="inspector-tabs">{['agents', 'handoffs', 'memory', 'guardrails', 'metrics'].map((item) => <button className={inspector === item ? 'active' : ''} onClick={() => setInspector(item)} key={item}>{item}</button>)}</div>
-          <AiBrainInspector customerKey={customer?.customer_key} run={lastRun} />
+          <ReplacementChain timeline={timeline} />
+          <div className="workspace workspace--focus"><ChatPanel key={customer?.customer_key} {...{ messages, input, setInput, send, busy, suggestions }} customerName={customer?.name} demos={demoScenarios} onSuggestion={(message) => send(message)} /><section className="timeline-panel"><div className="panel-label"><span>execução</span><code>{timeline.length} eventos</code></div><Timeline events={timeline} /></section></div>
         </>}
-        {nav === 'Agentes' && <AgentsPage agents={agents} adminMode={adminMode} setAdminMode={setAdminMode} reload={loadCore} />}
-        {nav === 'Guardrails' && <DataPage title="Segurança antes da inteligência." subtitle="Entrada é validada uma vez por turno, antes de qualquer modelo, memória ou trace.">{guardrails.length ? <pre>{JSON.stringify(guardrails, null, 2)}</pre> : <p className="inspector-empty">Nenhum evento ainda — só aparece aqui quando uma mensagem é de fato bloqueada. Tente o prompt de guardrail sugerido para a identidade Carla ou Diego.</p>}</DataPage>}
-        {nav === 'Métricas' && <MetricsPage metrics={metrics} evalRuns={evalRuns} adminMode={adminMode} />}
+        {nav === 'Decisões' && <CompliancePage adminMode={adminMode} setAdminMode={setAdminMode} customerKey={customer?.customer_key} />}
       </main>
-      <footer><span>MongoDB Atlas</span><code>multi_agent_poc + ai_brain</code><span>{customer?.name || 'identidade demo'}</span></footer>
-    </>
+    </div>
   );
 }

@@ -1,80 +1,89 @@
-# Multi-Agent on MongoDB
+# Multi-agente no MongoDB
 
 [![CI](https://github.com/adrianofratelli-glitch/MultiAgent-on-MDB/actions/workflows/ci.yml/badge.svg)](https://github.com/adrianofratelli-glitch/MultiAgent-on-MDB/actions/workflows/ci.yml)
 
-8 customer-service agents that coordinate through MongoDB Atlas — no queue, no Redis, no separate vector store. Routing rules, agent configs, memory, cache, handoffs and guardrail decisions are all documents you can query while the conversation is running.
+8 agentes de atendimento que se coordenam pelo MongoDB Atlas — sem fila, sem Redis, sem banco vetorial separado. Regras de roteamento, configurações dos agentes, memória, cache, handoffs e decisões de guardrail são todos documentos que você pode consultar enquanto a conversa acontece.
 
-## The demo in 5 steps
+## A demo em 5 passos
 
-**1. Customer sends one message.**
+**1. O cliente manda uma única mensagem.**
 
-![Chat home with the demo prompts](docs/screenshots/01-chat-home.png)
+![Tela inicial do chat com os prompts de demonstração](docs/screenshots/01-chat-home.png)
 
-**2. It walks through 4 agents in a single turn.** Support diagnoses the defect → product recommends a cheaper item → order processes the trade (the only write) → billing explains the invoice impact. Every hop is a document in `agent_handoffs`, streamed live via Change Streams.
+**2. Ela percorre 4 agentes em um só turno.** Suporte diagnostica o defeito → produto recomenda um item mais barato → pedidos processa a troca (a única escrita) → faturamento explica o impacto na fatura. Cada hop é um documento em `agent_handoffs`, transmitido ao vivo por Change Streams.
 
-![Agent chain timeline showing four handoffs in one turn](docs/screenshots/03-chain-timeline.png)
+![Timeline da cadeia de agentes mostrando quatro handoffs em um único turno](docs/screenshots/03-chain-timeline.png)
 
-**3. Agents are data, not deployments.** Model, persona, tools and token budget live in `agent_registry` — toggle an agent or swap its model mid-demo, no redeploy.
+**3. Agentes são dados, não deploys.** Modelo, persona, ferramentas e orçamento de tokens vivem no `agent_registry` — ligue/desligue um agente ou troque o modelo dele no meio da demo, sem redeploy.
 
-![Agent registry with per-agent model, scope and on/off toggle](docs/screenshots/04-agents-registry.png)
+![Registry de agentes com modelo, escopo e chave liga/desliga por agente](docs/screenshots/04-agents-registry.png)
 
-**4. Try to break it.** A jailbreak or fake-authority prompt hits the denylist first; anything new goes to a cheap LLM classifier that writes the pattern back to the denylist, so the next attempt is free.
+**4. Tente quebrar.** Um jailbreak ou um prompt de falsa autoridade bate primeiro na denylist; o que for novo vai para um classificador LLM barato que escreve o padrão de volta na denylist, então a próxima tentativa sai de graça.
 
-![Guardrails panel: blocks, self-fed denylist, flagged ambiguous cases](docs/screenshots/06-guardrails.png)
+![Painel de guardrails: bloqueios, denylist auto-alimentada, casos ambíguos sinalizados](docs/screenshots/06-guardrails.png)
 
-**5. Prove it happened.** Metrics come from the same collections everything else writes to.
+**5. Prove que aconteceu.** As métricas vêm das mesmas coleções em que todo o resto escreve.
 
-![Metrics: agent coverage, handoffs, writes, native searches](docs/screenshots/05-metrics.png)
+![Métricas: cobertura de agentes, handoffs, escritas, buscas nativas](docs/screenshots/05-metrics.png)
 
-## The agents
+## Os agentes
 
-| Agent | Job | Writes? |
+| Agente | Função | Escreve? |
 |---|---|---|
-| `orchestrator` | Classifies intent and routes | No |
-| `order_agent` | Order status, trades/refunds | Yes — status only, approved values |
-| `product_agent` | Catalog recommendations via `$vectorSearch` | No |
-| `support_agent` | Troubleshooting via hybrid RAG, opens tickets | Yes — support tickets |
-| `billing_agent` | Invoice lookups | No |
-| `warranty_agent` | Coverage by category + purchase date | No |
-| `loyalty_agent` | Points, tiers, reward redemption | Yes — point deduction |
-| `logistics_agent` | Carrier, tracking, ETA | Yes — reschedule flag |
+| `orchestrator` | Classifica a intenção e roteia | Não |
+| `order_agent` | Status do pedido, trocas/reembolsos | Sim — só status, com valores aprovados |
+| `product_agent` | Recomendações de catálogo via `$vectorSearch` | Não |
+| `support_agent` | Diagnóstico via RAG híbrido, abre chamados | Sim — tickets de suporte |
+| `billing_agent` | Consulta de faturas | Não |
+| `warranty_agent` | Cobertura por categoria + data da compra | Não |
+| `loyalty_agent` | Pontos, tiers, resgate de recompensas | Sim — dedução de pontos |
+| `logistics_agent` | Transportadora, rastreio, previsão de entrega | Sim — flag de reagendamento |
 
 ## Stack
 
-Python 3.12 · FastAPI · React + Vite · Anthropic (Haiku for routing, Sonnet for reasoning) · MongoDB Atlas (Vector Search with auto-embedding `voyage-4`, hybrid RRF, Change Streams, TTL, schema validation).
+Python 3.12 · FastAPI · React + Vite · Anthropic (Haiku para roteamento, Sonnet para raciocínio) · MongoDB Atlas (Vector Search com auto-embedding `voyage-4`, RRF híbrido, Change Streams, TTL, validação de schema).
 
-## Run it
+## Como rodar
 
 ```bash
 cp .env.example .env
 python3.12 -m venv .venv && source .venv/bin/activate
 pip install -r backend/requirements.txt
 python backend/seed.py
-cd backend && python run.py     # port 8031
+./start.sh                      # backend :8031 + frontend :5191
 ```
 
-```bash
-cd frontend && npm install && npm run dev   # port 5191
-```
+O launcher usa backend sem reload e build otimizado do frontend por padrão. Para desenvolver com reload/HMR, rode `POV_DEV=1 ./start.sh`; o build só é refeito quando fontes, lockfile ou configuração mudam.
 
-No Atlas cluster? `DEMO_MODE=1 AUTH_REQUIRED=1 python run.py` runs the same contracts in memory (no Vector Search / Change Streams). That's what CI uses.
+Sem cluster Atlas? `DEMO_MODE=1 AUTH_REQUIRED=1 python run.py` roda os mesmos contratos em memória (sem Vector Search / Change Streams). É o que a CI usa.
 
-Before a live demo, `python backend/warmup.py` calls the real prompts once so the cache hits are genuine.
+Antes de uma demo ao vivo, `python backend/warmup.py` chama os prompts marcados uma vez e reporta quais respostas estáveis foram de fato admitidas pela política de cache `stable_v1`.
 
-## Tests
+## Testes
 
 ```bash
 cd backend
-pytest -q                       # unit
-python tests/smoke.py <url>     # black-box
-python eval.py <url>            # golden dataset, results to eval_runs
+pytest -q                       # unitários
+python tests/smoke.py <url>     # caixa-preta
+python eval.py <url>            # golden dataset, resultados em eval_runs
 ```
 
-Every pull request runs the backend test suite and Ruff checks, plus a clean
-frontend production build and dependency audit. CI uses the deterministic
-in-memory data-store implementation and does not require Atlas or Anthropic
-credentials.
+O smoke repete a consulta personalizada dentro do mesmo `conversation_id` e
+exige HIT em `short_term_memory`; em seguida abre uma conversa nova e exige
+MISS. Assim ele valida o cache sem transformar replay de estado operacional em
+vazamento entre sessões.
+
+Todo pull request roda a suíte de testes do backend e checagens do Ruff, além
+de um build de produção limpo do frontend e auditoria de dependências. A CI
+usa a implementação determinística de data-store em memória e não exige
+credenciais de Atlas ou Anthropic.
 
 ## Docs
 
-[Architecture](docs/architecture.md) · [ADR-001](docs/adr/ADR-001-arquitetura-multi-agente.md)
+## Fronteira de produção
+
+Defina `ENVIRONMENT=production`, `AUTH_REQUIRED=1` e `DEMO_TOKEN_ISSUANCE_ENABLED=0`. A inicialização então falha fechada em caso de segredo de JWT/admin fraco ou padrão, CORS com curinga, autenticação desabilitada ou emissão de token de demo ligada. O `/metrics` é só para admin. O lançador local continua sendo um runtime de PoV; adicione terminação TLS, um IdP corporativo e uma plataforma gerenciada de processos/containers antes de qualquer exposição externa.
+
+## Documentação
+
+[Arquitetura](docs/architecture.md) · [ADR-001](docs/adr/ADR-001-arquitetura-multi-agente.md)

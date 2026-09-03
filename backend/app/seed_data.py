@@ -12,9 +12,16 @@ CUSTOMERS = [
 
 ORDERS = [
     {"order_id": "PED-1001", "owner_customer_key": "ana", "product": "Fone Pulse X", "status": "enviado", "timeline": [{"status": "criado", "at": "2026-07-10"}, {"status": "enviado", "at": "2026-07-14"}]},
-    {"order_id": "PED-1002", "owner_customer_key": "ana", "product": "Teclado Air", "status": "entregue", "timeline": [{"status": "entregue", "at": "2026-07-12"}]},
+    {"order_id": "PED-1002", "owner_customer_key": "ana", "product": "Teclado Air", "status": "troca_solicitada", "replacement_order_id": "PED-1012", "replacement_reason": "tecla travando", "timeline": [{"status": "criado", "at": "2026-07-02"}, {"status": "entregue", "at": "2026-07-12"}, {"status": "troca_solicitada", "at": "2026-07-16"}]},
+    {"order_id": "PED-1012", "owner_customer_key": "ana", "product": "Teclado Air", "status": "entregue", "replacement_reason": "reposição única", "timeline": [{"status": "criado", "at": "2026-07-18"}, {"status": "entregue", "at": "2026-07-22"}]},
     {"order_id": "PED-2001", "owner_customer_key": "bruno", "product": "Monitor View 27", "status": "processando", "timeline": [{"status": "criado", "at": "2026-07-15"}]},
-    {"order_id": "PED-3001", "owner_customer_key": "carla", "product": "Smartwatch Fit", "status": "enviado", "timeline": [{"status": "enviado", "at": "2026-07-13"}]},
+    # Cadeia de trocas da Carla: mesmo Smartwatch Fit trocado três vezes. Cada elo é um pedido
+    # comum; o relacionamento é `replacement_order_id`. Só a travessia ($graphLookup) revela que
+    # é defeito recorrente de lote e não um cliente azarado — ver app/graph.py.
+    {"order_id": "PED-3001", "owner_customer_key": "carla", "product": "Smartwatch Fit", "status": "troca_solicitada", "replacement_order_id": "PED-3011", "replacement_reason": "tela não liga", "timeline": [{"status": "criado", "at": "2026-05-02"}, {"status": "enviado", "at": "2026-05-06"}, {"status": "troca_solicitada", "at": "2026-05-20"}]},
+    {"order_id": "PED-3011", "owner_customer_key": "carla", "product": "Smartwatch Fit", "status": "troca_solicitada", "replacement_order_id": "PED-3021", "replacement_reason": "mesmo defeito: tela não liga", "timeline": [{"status": "criado", "at": "2026-05-22"}, {"status": "entregue", "at": "2026-05-27"}, {"status": "troca_solicitada", "at": "2026-06-14"}]},
+    {"order_id": "PED-3021", "owner_customer_key": "carla", "product": "Smartwatch Fit", "status": "troca_solicitada", "replacement_order_id": "PED-3031", "replacement_reason": "mesmo defeito: tela não liga", "timeline": [{"status": "criado", "at": "2026-06-16"}, {"status": "entregue", "at": "2026-06-21"}, {"status": "troca_solicitada", "at": "2026-07-09"}]},
+    {"order_id": "PED-3031", "owner_customer_key": "carla", "product": "Smartwatch Fit", "status": "enviado", "replacement_reason": "terceira reposição", "timeline": [{"status": "criado", "at": "2026-07-11"}, {"status": "enviado", "at": "2026-07-13"}]},
     {"order_id": "PED-3002", "owner_customer_key": "carla", "product": "Carregador Duo", "status": "entregue", "timeline": [{"status": "entregue", "at": "2026-07-11"}]},
     {"order_id": "PED-4001", "owner_customer_key": "diego", "product": "Caixa Sonora Mini", "status": "processando", "timeline": [{"status": "criado", "at": "2026-07-14"}]},
 ]
@@ -96,17 +103,22 @@ KB_ARTICLES = [
 ]
 
 # max_turn_tokens é o BUDGET do turno (persona + grounding + contexto recuperado + memória + saída);
+# Os valores têm ~35% de folga sobre o consumo observado, e a folga NÃO é decorativa: o
+# warranty_agent rodava a menos de 45 tokens do teto, então acrescentar duas frases ao
+# GROUNDING_RULES (que é compartilhado por todos) derrubou três cenários com HTTP 429 —
+# dois deles do roteiro de demo. Budget apertado quebra quando o prompt cresce, e o prompt
+# sempre cresce. Isto é dado no registry: ajustar é update_one, sem redeploy.
 # max_output_tokens é o teto de saída passado à API. Eram o mesmo campo, e a cascata de memória de longo
 # prazo (~600 tokens de contexto) passou a estourar o budget antes da primeira resposta sair.
 AGENTS = [
-    {"agent_key": "orchestrator", "label": "Orquestrador", "model": "claude-haiku-4-5", "fallback_model": "claude-haiku-4-5", "persona": "Classifique, roteie e consolide. Nunca responda diretamente ao cliente.", "allowed_tools": ["route", "consolidate"], "max_turn_tokens": 2000, "max_output_tokens": 700, "active": True},
-    {"agent_key": "order_agent", "label": "Pedidos", "model": "claude-haiku-4-5", "fallback_model": "claude-haiku-4-5", "persona": "Resolva status, troca e reembolso somente para pedidos do titular autenticado.", "allowed_tools": ["read_order", "update_order_status"], "max_turn_tokens": 3000, "max_output_tokens": 1000, "active": True},
-    {"agent_key": "product_agent", "label": "Produtos", "model": "claude-haiku-4-5", "fallback_model": "claude-haiku-4-5", "persona": "Recomende produtos relevantes usando somente resultados do catálogo.", "allowed_tools": ["vector_search_products"], "max_turn_tokens": 3500, "max_output_tokens": 1400, "active": True},
-    {"agent_key": "support_agent", "label": "Suporte", "model": "claude-haiku-4-5", "fallback_model": "claude-haiku-4-5", "persona": "Resolva dúvidas técnicas com evidência da base de conhecimento e transfira quando necessário.", "allowed_tools": ["hybrid_search_kb", "handoff"], "max_turn_tokens": 3500, "max_output_tokens": 1400, "active": True},
-    {"agent_key": "billing_agent", "label": "Cobrança", "model": "claude-haiku-4-5", "fallback_model": "claude-haiku-4-5", "persona": "Explique faturas do titular autenticado em modo somente leitura.", "allowed_tools": ["read_invoice"], "max_turn_tokens": 3000, "max_output_tokens": 900, "active": True},
-    {"agent_key": "warranty_agent", "label": "Garantia", "model": "claude-haiku-4-5", "fallback_model": "claude-haiku-4-5", "persona": "Verifique cobertura de garantia por categoria e data de compra do pedido do titular autenticado, em modo somente leitura.", "allowed_tools": ["read_warranty_policy", "read_order"], "max_turn_tokens": 3000, "max_output_tokens": 900, "active": True},
-    {"agent_key": "loyalty_agent", "label": "Fidelidade", "model": "claude-haiku-4-5", "fallback_model": "claude-haiku-4-5", "persona": "Informe saldo de pontos, tier e benefícios do programa de fidelidade do titular autenticado, em modo somente leitura.", "allowed_tools": ["read_loyalty_account"], "max_turn_tokens": 3000, "max_output_tokens": 900, "active": True},
-    {"agent_key": "logistics_agent", "label": "Logística", "model": "claude-haiku-4-5", "fallback_model": "claude-haiku-4-5", "persona": "Informe transportadora, código de rastreio, localização atual e previsão de entrega do pedido do titular autenticado, em modo somente leitura.", "allowed_tools": ["read_shipment"], "max_turn_tokens": 3000, "max_output_tokens": 900, "active": True},
+    {"agent_key": "orchestrator", "label": "Orquestrador", "model": "claude-haiku-4-5", "fallback_model": "claude-haiku-4-5", "persona": "Classifique, roteie e consolide. Nunca responda diretamente ao cliente.", "allowed_tools": ["route", "consolidate"], "max_turn_tokens": 2600, "max_output_tokens": 700, "active": True},
+    {"agent_key": "order_agent", "label": "Pedidos", "model": "claude-haiku-4-5", "fallback_model": "claude-haiku-4-5", "persona": "Resolva status, troca e reembolso somente para pedidos do titular autenticado.", "allowed_tools": ["read_order", "update_order_status"], "max_turn_tokens": 4000, "max_output_tokens": 1000, "active": True},
+    {"agent_key": "product_agent", "label": "Produtos", "model": "claude-haiku-4-5", "fallback_model": "claude-haiku-4-5", "persona": "Recomende produtos relevantes usando somente resultados do catálogo.", "allowed_tools": ["vector_search_products"], "max_turn_tokens": 4500, "max_output_tokens": 1400, "active": True},
+    {"agent_key": "support_agent", "label": "Suporte", "model": "claude-haiku-4-5", "fallback_model": "claude-haiku-4-5", "persona": "Resolva dúvidas técnicas com evidência da base de conhecimento e transfira quando necessário.", "allowed_tools": ["hybrid_search_kb", "handoff"], "max_turn_tokens": 4500, "max_output_tokens": 1400, "active": True},
+    {"agent_key": "billing_agent", "label": "Cobrança", "model": "claude-haiku-4-5", "fallback_model": "claude-haiku-4-5", "persona": "Explique faturas do titular autenticado em modo somente leitura.", "allowed_tools": ["read_invoice"], "max_turn_tokens": 4000, "max_output_tokens": 900, "active": True},
+    {"agent_key": "warranty_agent", "label": "Garantia", "model": "claude-haiku-4-5", "fallback_model": "claude-haiku-4-5", "persona": "Verifique cobertura de garantia por categoria e data de compra do pedido do titular autenticado, em modo somente leitura.", "allowed_tools": ["read_warranty_policy", "read_order"], "max_turn_tokens": 4000, "max_output_tokens": 900, "active": True},
+    {"agent_key": "loyalty_agent", "label": "Fidelidade", "model": "claude-haiku-4-5", "fallback_model": "claude-haiku-4-5", "persona": "Informe saldo de pontos, tier e benefícios do programa de fidelidade do titular autenticado, em modo somente leitura.", "allowed_tools": ["read_loyalty_account"], "max_turn_tokens": 4000, "max_output_tokens": 900, "active": True},
+    {"agent_key": "logistics_agent", "label": "Logística", "model": "claude-haiku-4-5", "fallback_model": "claude-haiku-4-5", "persona": "Informe transportadora, código de rastreio, localização atual e previsão de entrega do pedido do titular autenticado, em modo somente leitura.", "allowed_tools": ["read_shipment"], "max_turn_tokens": 4000, "max_output_tokens": 900, "active": True},
 ]
 
 ROUTING_RULES = [
@@ -260,7 +272,9 @@ DEMO_SCENARIOS = [
         "message": "quero resgatar um voucher agora; meus pontos são suficientes?",
         "capabilities": ["regra determinística", "saldo privado", "sem escrita indevida"],
         "expected_agents": ["loyalty_agent"], "expect_route_source": "rules",
-        "expect_contains": "ainda não dá", "expect_handoffs": 0, "expect_revisit": False, "warmup": False,
+        # a negação passou a dizer quanto FALTA e o que já dá para resgatar, em vez de
+        # só "ainda não dá" — a asserção acompanha a cópia nova
+        "expect_contains": "faltam", "expect_handoffs": 0, "expect_revisit": False, "warmup": False,
     },
     {
         "scenario_id": "bruno-jailbreak-guardrail", "customer_key": "bruno", "position": 5,
@@ -408,6 +422,18 @@ DEMO_SCENARIOS = [
         "capabilities": ["rota determinística", "policy read", "não bloqueada"],
         "expected_agents": ["warranty_agent"], "expect_route_source": "rules",
         "expect_handoffs": 0, "expect_revisit": False, "warmup": True,
+    },
+    {
+        # Travessia de grafo + escalonamento pausável. A mensagem evita de propósito as
+        # palavras "troca"/"trocar": elas pertencem ao order_agent e venceriam "garantia" no
+        # desempate por prioridade do cheap_route, pulando o agente que consulta a cadeia.
+        "scenario_id": "carla-recurring-defect-graph", "customer_key": "carla", "position": 8,
+        "label": "Cadeia de trocas ($graphLookup) escala para revisão humana",
+        "message": "o Smartwatch Fit do pedido PED-3001 quebrou de novo — a garantia cobre mais uma reposição?",
+        "capabilities": ["$graphLookup", "defeito de lote", "escalonamento pausável", "decisão registrada"],
+        "expected_agents": ["warranty_agent"], "expect_route_source": "rules",
+        "expect_handoffs": 0, "expect_write_collection": "pending_reviews",
+        "expect_revisit": False, "warmup": False,
     },
     {
         "scenario_id": "diego-paraphrase-freebie", "customer_key": "diego", "position": 6,

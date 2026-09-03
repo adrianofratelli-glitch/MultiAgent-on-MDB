@@ -3,21 +3,24 @@ import json
 import logging
 import sys
 import uuid
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from time import perf_counter
 from typing import Annotated
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from .budget import BudgetExceeded
+from .cascade import CACHE_POLICY
 from .config import get_settings
 from .database import DataStore, get_store, set_store, utcnow
+from .decisions import decision_trail
+from .reviews import list_reviews, override_rate, resolve_review
 from .llm import LLMGateway
 from .metrics import metrics
-from .models import AgentUpdate, ChatRequest, ChatResponse, TokenRequest
+from .models import AgentUpdate, ChatRequest, ChatResponse, ReviewResolution, TokenRequest
 from .orchestration import OrchestrationService
 from .rate_limit import SlidingWindowLimiter
 from .security import current_customer, issue_token, request_identity_key, require_admin
@@ -34,8 +37,27 @@ def log(event: str, **fields) -> None:
     logger.info(json.dumps(payload, default=str) if settings.log_json else f"{event} {fields}")
 
 
+def validate_runtime_security(runtime_settings) -> None:
+    """Fail startup on configurations that would expose demo credentials."""
+    if runtime_settings.environment.lower() in {"development", "dev", "local"}:
+        return
+    if runtime_settings.jwt_secret == "desenvolvimento-inseguro-troque-este-segredo":
+        raise RuntimeError("JWT_SECRET inseguro recusado fora de development")
+    if runtime_settings.admin_api_key == "admin-demo":
+        raise RuntimeError("ADMIN_API_KEY insegura recusada fora de development")
+    if len(runtime_settings.jwt_secret) < 32 or len(runtime_settings.admin_api_key) < 24:
+        raise RuntimeError("segredos de produção devem ter pelo menos 32/24 caracteres")
+    if not runtime_settings.auth_required:
+        raise RuntimeError("AUTH_REQUIRED deve permanecer ligado fora de development")
+    if runtime_settings.demo_token_issuance_enabled:
+        raise RuntimeError("DEMO_TOKEN_ISSUANCE_ENABLED deve estar desligado fora de development")
+    if "*" in runtime_settings.cors_origin_list:
+        raise RuntimeError("CORS_ORIGINS='*' é recusado fora de development")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    validate_runtime_security(settings)
     store = DataStore(settings)
     await store.connect()
     set_store(store)
@@ -98,6 +120,8 @@ async def unhandled_error_handler(request: Request, exc: Exception):
 
 @app.post("/api/auth/token")
 async def create_token(payload: TokenRequest, store: DataStore = Depends(get_store)):
+    if not settings.demo_token_issuance_enabled:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "emissão de token demo desabilitada")
     customer = await store.find_one("customers", {"customer_key": payload.customer_key})
     if not customer:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "identidade demo não encontrada")
@@ -164,6 +188,30 @@ async def handoffs(conversation_id: str = Query(min_length=4, max_length=80), cu
     return [{key: value for key, value in item.items() if key != "_id"} for item in items]
 
 
+@app.get("/api/decisions")
+async def decisions(
+    subject_id: str | None = Query(default=None, max_length=64),
+    customer: dict = Depends(current_customer),
+    store: DataStore = Depends(get_store),
+):
+    """Trilha de conformidade do próprio chamador: decisões imutáveis + eventos de auditoria.
+
+    A `customer_key` vem do JWT, nunca do query string — a trilha de um cliente não é
+    alcançável por outro nem informando o subject_id certo.
+    """
+    return await decision_trail(store, customer["customer_key"], subject_id=subject_id)
+
+
+@app.get("/api/reviews")
+async def my_reviews(
+    status_filter: str = Query(default="pending", pattern="^(pending|resolved)$", alias="status"),
+    customer: dict = Depends(current_customer),
+    store: DataStore = Depends(get_store),
+):
+    """Casos do próprio cliente que estão (ou estiveram) aguardando decisão humana."""
+    return await list_reviews(store, customer_key=customer["customer_key"], status=status_filter)
+
+
 @app.get("/api/memory/{customer_key}")
 async def memory(customer_key: str, customer: dict = Depends(current_customer), store: DataStore = Depends(get_store)):
     if customer_key != customer["customer_key"]:
@@ -184,13 +232,26 @@ INSPECTOR_COLLECTIONS = {
 
 
 @app.get("/api/inspector/{view}")
-async def inspector(view: str, customer: dict = Depends(current_customer), store: DataStore = Depends(get_store)):
+async def inspector(
+    view: str,
+    conversation_id: str | None = None,
+    customer: dict = Depends(current_customer),
+    store: DataStore = Depends(get_store),
+):
     collection = INSPECTOR_COLLECTIONS.get(view)
     if not collection:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "visão de inspetor desconhecida")
     query = {"customer_key": customer["customer_key"]}
+    if view == "cache":
+        query["cache_policy"] = CACHE_POLICY
     if view == "facts":
         query["active"] = True
+    if view == "short":
+        # Memória de CURTO prazo é por sessão. Filtrar só por customer_key mostrava as
+        # conversas anteriores todas: abrir uma aba nova, sem ter perguntado nada, exibia
+        # 5 documentos — e o painel passava a contradizer o próprio conceito que ele existe
+        # para provar. Sem conversa ativa, o correto é vir vazio.
+        query["session_id"] = conversation_id or "__sem_conversa__"
     items = await store.find_many(collection, query, limit=30, sort=[("created_at", -1)])
     return {
         "view": view,
@@ -212,22 +273,63 @@ async def guardrails(view: str, store: DataStore = Depends(get_store)):
     return [{key: value for key, value in item.items() if key != "_id"} for item in items]
 
 
+async def handoff_event_stream(request: Request, store: DataStore, customer_key: str, heartbeat_seconds: float = 15):
+    """Adapt the Change Stream to SSE with immediate confirmation and heartbeats."""
+    queue: asyncio.Queue[tuple[str, object | None]] = asyncio.Queue()
+
+    async def pump_handoffs() -> None:
+        try:
+            async for event in store.watch_handoffs(customer_key):
+                await queue.put(("event", event))
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            await queue.put(("error", exc))
+        finally:
+            await queue.put(("done", None))
+
+    pump = asyncio.create_task(pump_handoffs())
+    try:
+        # Confirm immediately and keep proxies/browsers alive while the stream is idle.
+        yield ": connected\n\n"
+        while not await request.is_disconnected():
+            try:
+                kind, payload = await asyncio.wait_for(queue.get(), timeout=heartbeat_seconds)
+            except TimeoutError:
+                yield ": keepalive\n\n"
+                continue
+            if kind == "event":
+                yield f"data: {json.dumps(payload, default=str)}\n\n"
+            elif kind == "error":
+                log("change_stream_error", customer_key=customer_key, error=type(payload).__name__)
+                break
+            else:
+                break
+    finally:
+        pump.cancel()
+        with suppress(asyncio.CancelledError):
+            await pump
+
+
 @app.get("/api/events/stream")
 async def events_stream(request: Request, customer: Annotated[dict, Depends(current_customer)], store: DataStore = Depends(get_store)):
     """Feed ao vivo de coordenação: Change Stream do Atlas em agent_handoffs, via SSE."""
 
-    async def generator():
-        async for event in store.watch_handoffs(customer["customer_key"]):
-            if await request.is_disconnected():
-                break
-            yield f"data: {json.dumps(event, default=str)}\n\n"
-
-    return StreamingResponse(generator(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+    return StreamingResponse(
+        handoff_event_stream(request, store, customer["customer_key"]),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.get("/api/metrics")
 async def get_metrics(_: dict = Depends(current_customer)):
     return metrics.snapshot()
+
+
+@app.get("/metrics", include_in_schema=False, dependencies=[Depends(require_admin)])
+async def prometheus_metrics():
+    return Response(metrics.prometheus(), media_type="text/plain; version=0.0.4")
 
 
 @app.get("/api/health")
@@ -238,8 +340,14 @@ async def health(store: DataStore = Depends(get_store)):
             store.count("agent_registry", {"active": True}, brain=True), store.count("agent_handoffs"), store.count("agent_traces")
         )
         return {"status": "ok", "storage": "memory-demo" if store.memory else "mongodb-atlas", "mongodb": True, "anthropic_configured": bool(settings.anthropic_api_key), "counts": {"agents": agents_count, "handoffs": handoffs_count, "traces": traces_count}, "at": utcnow()}
-    except Exception as exc:
-        return JSONResponse(status_code=503, content={"status": "degraded", "mongodb": False, "detail": str(exc)})
+    except Exception:
+        logger.warning("healthcheck storage unavailable", exc_info=True)
+        return JSONResponse(status_code=503, content={"status": "degraded", "mongodb": False})
+
+
+@app.get("/health/live")
+async def liveness():
+    return {"status": "alive"}
 
 
 @app.patch("/api/admin/agents/{agent_key}", dependencies=[Depends(require_admin)])
@@ -252,6 +360,37 @@ async def update_agent(agent_key: str, payload: AgentUpdate, store: DataStore = 
         raise HTTPException(status.HTTP_404_NOT_FOUND, "agente não encontrado")
     await store.insert_one("admin_audit", {"action": "agent.update", "target": agent_key, "changes": update, "at": utcnow()})
     return {"ok": True, "agent_key": agent_key, "changes": update}
+
+
+@app.get("/api/admin/reviews", dependencies=[Depends(require_admin)])
+async def pending_reviews(
+    status_filter: str = Query(default="pending", pattern="^(pending|resolved)$", alias="status"),
+    store: DataStore = Depends(get_store),
+):
+    """Fila do analista: todos os casos pausados, de todos os clientes."""
+    return {"reviews": await list_reviews(store, status=status_filter),
+            "override": await override_rate(store)}
+
+
+@app.post("/api/admin/reviews/{review_id}/resolve", dependencies=[Depends(require_admin)])
+async def resolve_pending_review(review_id: str, payload: ReviewResolution, store: DataStore = Depends(get_store)):
+    """Fecha a pausa: grava a decisão humana (imutável) e devolve o caso ao agente.
+
+    O handoff de volta é gravado em `agent_handoffs`, então a UI do cliente é notificada ao vivo
+    pelo Change Stream que já existe — sem canal novo.
+    """
+    try:
+        resolved = await resolve_review(store, review_id, human_decision=payload.decision,
+                                        resolved_by=payload.resolved_by, note=payload.note)
+    except RuntimeError as exc:
+        # A decisão final não foi registrada, então a revisão continua pendente de propósito.
+        # 503 e não 500: é uma falha transitória de gravação, e repetir a chamada é a ação certa.
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(exc)) from exc
+    if not resolved:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "revisão não encontrada ou já resolvida")
+    await store.insert_one("admin_audit", {"action": "review.resolve", "target": review_id,
+                                           "changes": {"decision": payload.decision}, "at": utcnow()})
+    return resolved
 
 
 @app.post("/api/admin/guardrails/candidates/{candidate_id}/approve", dependencies=[Depends(require_admin)])

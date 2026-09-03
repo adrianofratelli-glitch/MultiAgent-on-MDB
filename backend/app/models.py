@@ -22,7 +22,7 @@ class AgentUpdate(BaseModel):
 
 
 class OrderStatusUpdate(BaseModel):
-    order_id: str
+    order_id: str = Field(min_length=5, max_length=64)
     status: Literal["processando", "enviado", "entregue", "troca_solicitada", "reembolsado"]
 
     @field_validator("order_id")
@@ -39,11 +39,18 @@ class TimelineEvent(BaseModel):
     title: str
     agent: str | None = None
     collection: str | None = None
-    op: Literal["read", "write", "vectorSearch", "hybridSearch", "changeStream"] | None = None
+    op: Literal["read", "write", "vectorSearch", "hybridSearch", "changeStream", "graphLookup"] | None = None
     filter: dict[str, Any] | None = None
     result: Any = None
     reason: str | None = None
     duration_ms: float = 0
+
+
+class Suggestion(BaseModel):
+    """Próximo passo clicável, sempre derivado de um documento que existe."""
+    topic: str
+    label: str
+    message: str
 
 
 class ChatResponse(BaseModel):
@@ -56,4 +63,12 @@ class ChatResponse(BaseModel):
     tokens_economizados: int = 0
     timeline: list[TimelineEvent]
     usage: dict[str, int]
+    suggestions: list[Suggestion] = []
 
+
+class ReviewResolution(BaseModel):
+    """Resolução de um caso escalado. `decision` é fechada: o analista escolhe entre encaminhamentos
+    conhecidos, não digita uma ação livre que ninguém depois consegue agregar."""
+    decision: Literal["quality_analysis", "approve_replacement", "refund", "reject"]
+    resolved_by: str = Field(min_length=2, max_length=80)
+    note: str = Field(default="", max_length=2000)
