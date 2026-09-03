@@ -87,5 +87,5 @@ No containerization (no Dockerfile/docker-compose) — local dev only, via venv 
 ## Known gaps (verified against code, not just docs)
 
 - Metrics (`backend/app/metrics.py`) are in-process only, reset on restart — no persistence/aggregation across instances.
-- No CI/Docker/deployment config.
+- CI runs backend tests and lint plus a clean frontend build. There is no Docker or deployment configuration.
 - LLM synthesis and the semantic guardrail both cost real Anthropic tokens per turn — fine for a demo, would need caching/sampling tuning before high-volume production use.
