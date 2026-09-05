@@ -1,6 +1,11 @@
+from typing import TYPE_CHECKING
+
 from app.agents import wants_replacement
 from app.graph import (build_order_chain_pipeline, summarize_order_chain,
                        traverse_order_chain_in_memory)
+
+if TYPE_CHECKING:
+    from app.database import DataStore
 
 ORDERS = [
     {"order_id": "PED-3001", "owner_customer_key": "carla", "product": "Smartwatch Fit", "replacement_order_id": "PED-3011"},
