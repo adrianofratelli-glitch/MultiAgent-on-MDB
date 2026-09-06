@@ -143,3 +143,8 @@ Nessa ordem, e o primeiro item não é opcional:
 2. **`python backend/warmup.py`** — é o que faz o passo 7 do roteiro ser um HIT genuíno. Roda **depois** do seed, nunca antes.
 3. Portas 8031 e 5191 livres — as duas são estritas e o processo sai se estiverem ocupadas.
 4. Opcional, se der tempo: `python backend/eval.py` — 28/28 antes de subir no palco.
+
+
+## Comportamento de resiliência integrado
+
+Impedir chat concorrente com troca de identidade, limpar contexto anterior e bloquear cliques duplicados; limitar JSON a 30 s/chat a 300 s; liberar leitor SSE e aceitar CRLF. A implementação vigente está em `main`; consulte o estado atual de `../../REVIEW.md` para validação e propostas não aplicadas.

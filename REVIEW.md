@@ -1,3 +1,5 @@
+> Estado vigente: melhoria `5cd4bd9` aprovada pelo usuário e integrada em `main`. As menções abaixo a aprovação pendente são históricas. As propostas de core/schema/dataset continuam sem aplicação.
+
 # Revisão de engenharia e design — multiagente-atendimento
 
 ## Resultado
