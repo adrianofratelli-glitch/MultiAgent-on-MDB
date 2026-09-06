@@ -1,19 +1,32 @@
+// O prazo cobre headers e corpo; nenhuma escrita é reenviada automaticamente.
+async function boundedRequest(work, timeoutMs = 30000) {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
+  try { return await work(controller.signal) }
+  finally { clearTimeout(timer) }
+}
+
 const BASE = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8031';
 
 let token = localStorage.getItem('multi-agent-token') || '';
 
 async function request(path, options = {}) {
-  const headers = { 'Content-Type': 'application/json', ...(options.headers || {}) };
-  if (token) headers.Authorization = `Bearer ${token}`;
-  let response;
-  try {
-    response = await fetch(`${BASE}${path}`, { ...options, headers });
-  } catch {
-    throw new Error('Backend indisponível. Confirme que a API está ativa na porta 8031 e tente novamente.');
-  }
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(data.detail || `HTTP ${response.status}`);
-  return data;
+  return boundedRequest(async (signal) => {
+    const headers = { 'Content-Type': 'application/json', ...(options.headers || {}) };
+    if (token) headers.Authorization = `Bearer ${token}`;
+    let response;
+    try {
+      response = await fetch(`${BASE}${path}`, { ...options, headers, signal });
+    } catch {
+      throw new Error('Backend indisponível. Confirme que a API está ativa na porta 8031 e tente novamente.');
+    }
+    const data = await response.json().catch(() => {
+      if (response.ok) throw new Error('Resposta incompleta ou inválida do backend. Tente novamente.')
+      return {}
+    });
+    if (!response.ok) throw new Error(data.detail || `HTTP ${response.status}`);
+    return data;
+  }, path === '/api/chat' ? 300000 : 30000)
 }
 
 export const api = {
@@ -51,18 +64,23 @@ export const api = {
   async streamEvents(onEvent, signal, onOpen) {
     const response = await fetch(`${BASE}/api/events/stream`, { headers: { Authorization: `Bearer ${token}` }, signal });
     if (!response.ok) {
-      const data = await response.json().catch(() => ({}));
+      const data = await response.json().catch(() => {
+    if (response.ok) throw new Error('Resposta incompleta ou inválida do backend. Tente novamente.')
+    return {}
+  });
       throw new Error(data.detail || `Feed ao vivo indisponível (HTTP ${response.status})`);
     }
     if (!response.body) throw new Error('Feed ao vivo sem corpo de resposta');
     onOpen?.();
     const reader = response.body.getReader();
+    try {
     const decoder = new TextDecoder();
     let buffer = '';
     while (true) {
       const { value, done } = await reader.read();
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
+      buffer = buffer.replace(/\r\n/g, '\n');
       const chunks = buffer.split('\n\n');
       buffer = chunks.pop();
       for (const chunk of chunks) {
@@ -70,6 +88,10 @@ export const api = {
           try { onEvent(JSON.parse(chunk.slice(6))); } catch { /* linha incompleta, ignora */ }
         }
       }
+    }
+    } finally {
+      reader.cancel().catch(() => {});
+      reader.releaseLock();
     }
   },
 };

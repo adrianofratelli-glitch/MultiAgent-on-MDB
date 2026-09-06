@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { api } from './api.js';
 import Timeline from './components/Timeline.jsx';
 import ReplacementChain from './components/ReplacementChain.jsx';
@@ -184,6 +184,7 @@ export default function App() {
   const [timeline, setTimeline] = useState([]);
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
+  const operationRef = useRef(false);
   const [error, setError] = useState('');
   const [conversationId, setConversationId] = useState(null);
   const [lastRun, setLastRun] = useState(null);
@@ -201,6 +202,10 @@ export default function App() {
   // na tela parece que o cliente já falou com o agente. a retomada continua valendo ao trocar de
   // identidade no meio da sessão, que é quando ela realmente evita um painel vazio.
   const switchIdentity = async (customerKey, { resume = true } = {}) => {
+    if (operationRef.current) return;
+    operationRef.current = true; setBusy(true); setError('');
+    // Never display the previous identity's conversation while its replacement loads.
+    setCustomer(null); setConversationId(null); setMessages([]); setTimeline([]); setSuggestions([]); setLastRun(null);
     try {
       const who = await api.login(customerKey); setCustomer(who); await loadCore();
       const [mem, gr, met, lastConv, scenarios] = await Promise.all([api.memory(who.customer_key), api.guardrails('events'), api.metrics(), api.latestConversation(), api.demoScenarios()]);
@@ -217,7 +222,8 @@ export default function App() {
       } else {
         setConversationId(null); setMessages([]); setTimeline([]); setLastRun(null); setSuggestions([]);
       }
-    } catch (err) { setError(err.message); }
+    } catch (err) { setCustomer(null); setError(err.message); }
+    finally { operationRef.current = false; setBusy(false); }
   };
   useEffect(() => { switchIdentity('ana', { resume: false }); }, []);
 
@@ -273,13 +279,15 @@ export default function App() {
   }, [customer?.customer_key]);
 
   const newConversation = () => {
+    if (operationRef.current) return;
     setConversationId(null); setMessages([]); setTimeline([]); setLastRun(null); setHandoffs([]); setInput(''); setSuggestions([]);
     setGuardrails([]); setMetrics({});
   };
 
   const send = async (override) => {
     const raw = typeof override === 'string' ? override : input;
-    if (!raw.trim() || busy) return;
+    if (!raw.trim() || operationRef.current || !customer) return;
+    operationRef.current = true;
     const value = raw.trim(); setInput(''); setBusy(true); setError(''); setSuggestions([]);
     setMessages((items) => [...items, { role: 'user', text: value }]);
     try {
@@ -290,7 +298,7 @@ export default function App() {
       const [hs, met, gr, mem] = await Promise.all([api.handoffs(run.conversation_id), api.metrics(), api.guardrails('events'), api.memory(customer.customer_key)]);
       setHandoffs(hs); setMetrics(met); setGuardrails(gr); setMemory(mem);
     } catch (err) { setError(err.message); }
-    finally { setBusy(false); }
+    finally { operationRef.current = false; setBusy(false); }
   };
 
   const agentLabels = useMemo(() => Object.fromEntries(agents.map((agent) => [agent.agent_key, agent.label])), [agents]);
@@ -314,7 +322,7 @@ export default function App() {
   return (
     <div data-pov-shell>
       <a className="pov-skip-link" href="#conteudo-principal">Pular para o conteúdo</a>
-      <nav className="top-nav"><div className="nav-inner"><button className="brand" onClick={() => setNav('Chat')} aria-label="Ir para o Chat"><span className="leaf">◆</span><span>MongoDB</span><b>Agent Control Plane</b></button><div className="nav-tabs">{NAV.map((item) => <button className={nav === item ? 'active' : ''} aria-current={nav === item ? 'page' : undefined} key={item} onClick={() => setNav(item)}>{item}</button>)}</div><label className="identity-select">identidade<select value={customer?.customer_key || 'ana'} onChange={(event) => switchIdentity(event.target.value)}>{IDENTITIES.map((key) => <option key={key} value={key}>{key}</option>)}</select></label><div className="live-pill" title={liveError || 'Change Stream do MongoDB Atlas em agent_handoffs'}><span className={liveStatus === 'live' ? 'ok' : liveStatus === 'connecting' ? 'connecting' : ''} />{liveStatus === 'live' ? 'ao vivo' : liveStatus === 'connecting' ? 'conectando' : 'offline'}</div><div className="health-pill"><span className={health ? 'ok' : ''} />{health ? `${health.storage} · ok` : 'conectando'}</div></div></nav>
+      <nav className="top-nav"><div className="nav-inner"><button className="brand" onClick={() => setNav('Chat')} aria-label="Ir para o Chat"><span className="leaf">◆</span><span>MongoDB</span><b>Agent Control Plane</b></button><div className="nav-tabs">{NAV.map((item) => <button className={nav === item ? 'active' : ''} aria-current={nav === item ? 'page' : undefined} key={item} onClick={() => setNav(item)}>{item}</button>)}</div><label className="identity-select">identidade<select disabled={busy} value={customer?.customer_key || 'ana'} onChange={(event) => switchIdentity(event.target.value)}>{IDENTITIES.map((key) => <option key={key} value={key}>{key}</option>)}</select></label><div className="live-pill" title={liveError || 'Change Stream do MongoDB Atlas em agent_handoffs'}><span className={liveStatus === 'live' ? 'ok' : liveStatus === 'connecting' ? 'connecting' : ''} />{liveStatus === 'live' ? 'ao vivo' : liveStatus === 'connecting' ? 'conectando' : 'offline'}</div><div className="health-pill"><span className={health ? 'ok' : ''} />{health ? `${health.storage} · ok` : 'conectando'}</div></div></nav>
       <main id="conteudo-principal" tabIndex={-1} className="content">
         {error && <div className="error-banner">{error}<button aria-label="Fechar aviso" onClick={() => setError('')}>×</button></div>}
         {nav === 'Chat' && <>

@@ -56,3 +56,13 @@ Esta seção atualiza o estado dos achados históricos acima.
 - pip-audit atual: pytest 8.4.2: PYSEC-2026-1845
 - Ambiente: pip 26.2.1 nos ambientes que possuem pip; FinScope mantém uv sem pip. Essa atualização local não altera arquivos de dependências das PoVs.
 - `_shared`: nenhum importador estático comprovado nesta PoV; apenas smoke consome o helper no inventário.
+
+
+## Homologação de resiliência e UI
+
+- Melhoria: Impedir chat concorrente com troca de identidade, limpar contexto anterior e bloquear cliques duplicados; limitar JSON a 30 s/chat a 300 s; liberar leitor SSE e aceitar CRLF.
+- Isolamento: `review/codex-homologation`, baseada no HEAD `1f05a38`. Mudança de estado observável; aguardando aprovação individual, sem merge.
+- Validação: build passou; UI offline em 1440×1000, 768×1024 e 360×800 sem pageerror nem overflow horizontal; skip link transfere foco. 2 testes novos de transporte/polling neste repositório. As suítes locais anteriores foram reexecutadas; resultados consolidados no vault PoVs-Handoffs.
+- Limite: teste offline/fixture não certifica cenário real completo nem ausência de bugs. Não houve alteração de schema, dataset ou dependência core.
+- Propostas preservadas: pytest 8.4.2 → 9.0.3: corrige advisory local, mas salto major requer compatibilidade de plugins/CI. Busca vetorial e retomada Change Stream reais exigem integração; DEMO_MODE não os certifica. Sem alteração de customer_key, thresholds, modelos ou políticas persistidas.
+- `_shared` e daemon do portal não foram alterados nesta rodada.
