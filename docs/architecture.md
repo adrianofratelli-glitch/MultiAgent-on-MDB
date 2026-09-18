@@ -52,6 +52,8 @@ sequenceDiagram
     A-->>C: resposta consolidada + timeline
 ```
 
+Esse mesmo turno vira uma trace Langfuse opcional (`backend/app/langfuse_client.py`), com um span/generation por passo acima — ver seção de Observability no README.
+
 ## Limites de segurança
 
 - O token define `customer_key`; campos de identidade do payload são ignorados.
