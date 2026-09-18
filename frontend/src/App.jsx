@@ -10,6 +10,35 @@ const NAV = ['Chat', 'Decisões'];
 const OP_LABELS = { read: 'leitura', write: 'escrita', vectorSearch: '$vectorSearch', hybridSearch: 'híbrido BM25 + vetor', changeStream: 'change stream', graphLookup: '$graphLookup' };
 const IDENTITIES = ['ana', 'bruno', 'carla', 'diego'];
 
+// Prova visual do pitch "MongoDB reduz custo de LLM" direto na PoV, sem precisar abrir o
+// Langfuse: cascata semântica (curto prazo + semantic_cache, HIT = zero chamada ao LLM,
+// dado real de cascade_lookup) e prompt cache da Anthropic (cache_read/cache_write vêm do
+// budget real do turno, orchestration.py:usage).
+function MongoCacheSavings({ run }) {
+  if (!run) return null;
+  const cacheRead = run.usage?.cache_read || 0;
+  const cacheWrite = run.usage?.cache_write || 0;
+  const promptTotal = cacheRead + (run.usage?.total || 0);
+  const promptPct = promptTotal > 0 ? Math.round((cacheRead / promptTotal) * 100) : 0;
+  return (
+    <div className="cache-savings-card">
+      <div className="cache-savings-title">💰 Economia MongoDB neste turno</div>
+      <div className="cache-savings-row">
+        <span>Cascata semântica (curto prazo + Atlas Vector Search)</span>
+        {run.cache_hit
+          ? <b className="cache-savings-hit">HIT ({run.cache_source}) — 0 chamadas ao LLM (~{run.tokens_economizados ?? 0} tokens evitados)</b>
+          : <span className="dim">MISS — resposta gerada pelo LLM</span>}
+      </div>
+      {cacheRead > 0 && (
+        <div className="cache-savings-row">
+          <span>Prompt cache (Anthropic, prefixo ancorado em documento do MongoDB)</span>
+          <b className="cache-savings-hit">{cacheRead} tokens reaproveitados ({promptPct}% deste turno{cacheWrite ? `, ${cacheWrite} escritos no cache` : ''})</b>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ChatPanel({ messages, input, setInput, send, busy, customerName, demos, suggestions, onSuggestion }) {
   return (
     <section className="chat-panel">
@@ -326,7 +355,8 @@ export default function App() {
       <main id="conteudo-principal" tabIndex={-1} className="content">
         {error && <div className="error-banner">{error}<button aria-label="Fechar aviso" onClick={() => setError('')}>×</button></div>}
         {nav === 'Chat' && <>
-          <header className="stage-header"><div><span>coordenação no Atlas</span><h1>Agentes em ação.</h1></div><div className="turn-state"><code>{conversationId || 'novo turno'}</code><b>{lastRun?.active_agent || 'aguardando'}</b><button className="new-conversation-btn" onClick={newConversation} disabled={busy}>Nova conversa</button></div></header>
+          <header className="stage-header"><div><span>coordenação no Atlas</span><h1>Agentes em ação.</h1></div><div className="turn-state"><code>{conversationId || 'novo turno'}</code><b>{lastRun?.active_agent || 'aguardando'}</b>{lastRun?.langfuse_trace_url && <a href={lastRun.langfuse_trace_url} target="_blank" rel="noreferrer" className="langfuse-link" title="Abrir trace completo da cadeia de agentes (tokens, custo, latência por hop) no Langfuse">🔭 Ver trace no Langfuse ↗</a>}<button className="new-conversation-btn" onClick={newConversation} disabled={busy}>Nova conversa</button></div></header>
+          <MongoCacheSavings run={lastRun} />
           {cast.length > 0 && (
             <div className="agent-cast" title={lastRun?.route_source === 'fanout' ? 'Agentes despachados em paralelo (fan-out), não em cadeia' : 'Agentes que participaram deste turno, em ordem de atuação'}>
               <span className="agent-cast-label">{lastRun?.route_source === 'fanout' ? 'despacho paralelo' : 'agentes em ação'}</span>

@@ -1,12 +1,16 @@
+import logging
 from functools import lru_cache
 from typing import Any
 
 from .config import Settings, get_settings
 
+logger = logging.getLogger("app.langfuse_client")
+
 
 class _NoopLangfuse:
-    """Sem chave configurada: instrumentação vira no-op, igual ao padrão de fallback do resto do repo
-    (LLMGateway sem api key, guardrail sem client) — DEMO_MODE/CI não dependem de credencial externa."""
+    """Sem chave configurada (ou Langfuse fora do ar): instrumentação vira no-op, igual ao padrão de
+    fallback do resto do repo (LLMGateway sem api key, guardrail sem client) — DEMO_MODE/CI não
+    dependem de credencial externa, e uma demo ao vivo nunca quebra por causa de observability."""
 
     def trace(self, **kwargs) -> "_NoopTrace":
         return _NoopTrace()
@@ -22,53 +26,83 @@ class _NoopTrace:
     def update(self, **kwargs) -> None:
         return None
 
+    def get_trace_url(self) -> None:
+        return None
+
 
 @lru_cache
 def get_langfuse(settings: Settings | None = None) -> Any:
     settings = settings or get_settings()
     if not settings.langfuse_enabled:
         return _NoopLangfuse()
-    from langfuse import Langfuse
+    try:
+        from langfuse import Langfuse
 
-    return Langfuse(
-        public_key=settings.langfuse_public_key,
-        secret_key=settings.langfuse_secret_key,
-        host=settings.langfuse_host,
-    )
+        client = Langfuse(
+            public_key=settings.langfuse_public_key,
+            secret_key=settings.langfuse_secret_key,
+            host=settings.langfuse_host,
+        )
+        # auth_check roda uma vez (função é @lru_cache) — sem isso um Langfuse fora do ar não
+        # impede a criação de traces (o SDK é fire-and-forget): o turno seguiria normal, mas a
+        # UI mostraria um link "Ver no Langfuse" que dá 404 no meio de uma demo ao vivo. Aqui a
+        # feature inteira vira no-op em vez de visível-e-quebrada.
+        if not client.auth_check():
+            raise RuntimeError("Langfuse auth_check falhou")
+        return client
+    except Exception:  # noqa: BLE001 — tracing nunca derruba o turno
+        logger.warning("Langfuse indisponível/mal configurado; tracing desligado para este processo")
+        return _NoopLangfuse()
 
 
-def log_cache_decision(
+# TimelineEvent.category -> como virar observação no Langfuse. "agent" vira generation (custou uma
+# chamada de LLM); os demais viram span (decisão/leitura/escrita determinística, sem custo de LLM).
+_GENERATION_CATEGORIES = {"agent"}
+
+
+def build_turn_trace(
     *,
     conversation_id: str,
     customer_key: str,
     message: str,
-    cache: str,
-    fonte: str | None,
-    score: float | None,
-    tokens_economizados: int,
-    memorias_recuperadas: int,
-    response: str | None = None,
+    response: str,
+    timeline: list,
+    active_agent: str,
     usage: dict | None = None,
-    model: str | None = None,
-) -> None:
-    """Um trace por turno de decisão de cache: span pro HIT (sem chamada de LLM), generation pro MISS
-    (LLM foi chamado de verdade). Estimativa de tokens economizados é sempre rotulada como estimativa,
-    não como medição real de uso — só o MISS carrega usage real vindo do budget."""
+) -> str | None:
+    """Uma trace por turno cobrindo a timeline INTEIRA — roteamento, decisão de cache, cada hop de
+    agente (com handoff) e os guardrails — em vez de traces desconexas por decisão isolada. É o que
+    deixa visível no Langfuse exatamente o que a UI já mostra na Timeline: a cadeia de coordenação
+    entre os 8 agentes, não só se o cache bateu ou não.
+
+    `message`/`response` chegam aqui já mascarados pelo guardrail de PII (mesma garantia do
+    restante do pipeline) — nunca dado cru do cliente.
+    """
     client = get_langfuse()
-    trace = client.trace(name="semantic_cache_cascade", session_id=conversation_id, user_id=customer_key, input=message)
-    if cache == "hit":
-        trace.span(
-            name="cache_lookup",
-            input=message,
-            output=response,
-            metadata={"cache": "hit", "fonte": fonte, "score": score, "tokens_economizados_estimado": tokens_economizados},
-        )
-    else:
-        trace.generation(
-            name="llm_synthesize",
-            input=message,
-            output=response,
-            model=model,
-            usage=usage,
-            metadata={"cache": "miss", "memorias_recuperadas": memorias_recuperadas},
-        )
+    trace = client.trace(
+        name="multiagent.turn", session_id=conversation_id, user_id=customer_key,
+        input=message, metadata={"active_agent": active_agent, "usage": usage or {}},
+    )
+    for event in timeline:
+        title = getattr(event, "title", None) or event.get("title") if isinstance(event, dict) else event.title
+        category = getattr(event, "category", None) if not isinstance(event, dict) else event.get("category")
+        agent = getattr(event, "agent", None) if not isinstance(event, dict) else event.get("agent")
+        result = getattr(event, "result", None) if not isinstance(event, dict) else event.get("result")
+        event_filter = getattr(event, "filter", None) if not isinstance(event, dict) else event.get("filter")
+        duration_ms = getattr(event, "duration_ms", 0) if not isinstance(event, dict) else event.get("duration_ms", 0)
+        name = f"{category}.{agent}" if agent else category
+        if category in _GENERATION_CATEGORIES:
+            trace.generation(
+                name=name, model=None, input=event_filter, output=result,
+                metadata={"title": title, "latency_ms": duration_ms},
+            )
+        else:
+            trace.span(
+                name=name, input=event_filter, output=result,
+                metadata={"title": title, "latency_ms": duration_ms},
+            )
+    trace.update(output=response)
+    try:
+        return trace.get_trace_url()
+    except Exception:  # noqa: BLE001
+        return None

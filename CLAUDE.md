@@ -103,3 +103,9 @@ A melhoria `5cd4bd9` está integrada em `main`: Impedir chat concorrente com tro
 Comece pelo estado vigente no topo de [REVIEW.md](REVIEW.md); não refaça merges com base em seções históricas. No workspace, `../STATUS_PORTFOLIO.md` aponta para as evidências pós-merge e decisões restantes. Não faça push nem altere dataset/schema/core sem autorização específica.
 
 Regressões de frontend: `cd frontend && node --test tests/*.test.mjs`.
+
+## Observability (Langfuse)
+
+`app/langfuse_client.py:build_turn_trace` manda UMA trace por turno cobrindo a `timeline` inteira — roteamento, decisão de cache, cada hop de agente (generation) e handoff/guardrail (span) — chamada de dentro de `orchestration.py:_persist_trace`, o único ponto de saída de todo turno (6 caminhos: bloqueio, fora de escopo, cache hit em `run_turn`/`_run_fanout`, cadeia completa, fanout completo). Fail-open sem `LANGFUSE_PUBLIC_KEY`/`LANGFUSE_SECRET_KEY`/`langfuse_enabled` — nunca derruba o turno; `get_langfuse()` roda `auth_check()` uma vez por processo para nunca expor um link que dá 404. `message`/`response` chegam já mascarados pelo guardrail de PII antes de qualquer chamada ao Langfuse. O card "💰 Economia MongoDB" no frontend (`App.jsx`) mostra cascata semântica + prompt cache do turno sem precisar abrir o Langfuse.
+
+**Nunca mencionar Postgres em call/demo/material de cliente** — é infra interna do Langfuse (self-host), invisível, e citá-la mistura a mensagem com um concorrente direto da MongoDB. Ver `../observability/README.md` para o racional completo.

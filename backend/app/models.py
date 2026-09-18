@@ -64,6 +64,7 @@ class ChatResponse(BaseModel):
     timeline: list[TimelineEvent]
     usage: dict[str, int]
     suggestions: list[Suggestion] = []
+    langfuse_trace_url: str | None = None
 
 
 class ReviewResolution(BaseModel):
