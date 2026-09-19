@@ -14,6 +14,7 @@ class TurnBudget:
     # para ChatResponse.usage e aparece na UI.
     cache_read_tokens: int = 0
     cache_write_tokens: int = 0
+    llm_calls: list[dict] = field(default_factory=list)
 
     @property
     def total_used(self) -> int:
@@ -37,4 +38,3 @@ class TurnBudget:
 
 def estimate_tokens(text: str) -> int:
     return max(1, (len(text) + 3) // 4)
-

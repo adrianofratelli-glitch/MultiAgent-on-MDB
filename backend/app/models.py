@@ -44,6 +44,7 @@ class TimelineEvent(BaseModel):
     result: Any = None
     reason: str | None = None
     duration_ms: float = 0
+    replayed: bool = False
 
 
 class Suggestion(BaseModel):
@@ -65,6 +66,8 @@ class ChatResponse(BaseModel):
     usage: dict[str, int]
     suggestions: list[Suggestion] = []
     langfuse_trace_url: str | None = None
+    llm_calls: list[dict[str, Any]] = Field(default_factory=list)
+    economics: dict[str, Any] = Field(default_factory=dict)
 
 
 class ReviewResolution(BaseModel):

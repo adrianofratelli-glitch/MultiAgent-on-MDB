@@ -176,6 +176,8 @@ async def latest_conversation(customer: dict = Depends(current_customer), store:
         trace = traces[0]
         conversation["last_timeline"] = trace.get("timeline", [])
         conversation["last_usage"] = trace.get("usage", {})
+        conversation["last_llm_calls"] = trace.get("llm_calls", [])
+        conversation["last_economics"] = trace.get("economics", {})
     return conversation
 
 

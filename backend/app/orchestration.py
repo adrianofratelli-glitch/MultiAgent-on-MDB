@@ -3,6 +3,7 @@ import uuid
 from time import perf_counter
 
 from .agents import RUNNERS
+from .economics import summarize_calls
 from .budget import TurnBudget, estimate_tokens
 from .cascade import (GLOBAL_CACHE_INTENTS, cascade_long_term_context, cascade_lookup, cascade_store_episode,
                       cascade_store_short_term, cascade_store_turn)
@@ -24,7 +25,7 @@ async def _record_collection_metrics(timeline: list[TimelineEvent]) -> None:
     """Contador cumulativo de toque por collection+operação — alimenta o painel 'Coleções' no front,
     prova visual de que MongoDB é o único data store por trás de leitura, escrita, vector e hybrid search."""
     for event in timeline:
-        if event.collection and event.op:
+        if event.collection and event.op and not event.replayed:
             await metrics.increment(f"collection.{event.collection}.{event.op}")
 
 
@@ -84,6 +85,15 @@ class OrchestrationService:
         self.llm = llm
         self.global_budget = global_budget
 
+    @staticmethod
+    def _usage(budget):
+        return {**budget.used_by_agent, "total": budget.total_used,
+                "cache_read": budget.cache_read_tokens, "cache_write": budget.cache_write_tokens}
+
+    @staticmethod
+    def _response(budget, **kwargs):
+        return ChatResponse(**kwargs, llm_calls=budget.llm_calls, economics=summarize_calls(budget.llm_calls))
+
     async def run_turn(self, message: str, customer: dict, conversation_id: str | None) -> ChatResponse:
         started = perf_counter()
         requested_conversation_id = conversation_id
@@ -126,9 +136,9 @@ class OrchestrationService:
                     base="Não posso atender essa solicitação porque ela viola a política de segurança.",
                 )
             )
-            trace_url = await self._persist_trace(conversation_id, customer, masked, response, timeline, "guardrail", {})
+            trace_url = await self._persist_trace(conversation_id, customer, masked, response, timeline, "guardrail", self._usage(budget), (perf_counter() - started) * 1000, llm_calls=budget.llm_calls)
             await _record_collection_metrics(timeline)
-            return ChatResponse(conversation_id=conversation_id, response=response, active_agent="guardrail", route_source="fallback", cache_hit=False, timeline=timeline, usage={}, suggestions=build_suggestions(snapshot), langfuse_trace_url=trace_url)
+            return self._response(budget, conversation_id=conversation_id, response=response, active_agent="guardrail", route_source="fallback", cache_hit=False, timeline=timeline, usage=self._usage(budget), suggestions=build_suggestions(snapshot), langfuse_trace_url=trace_url)
 
         written_facts = await extract_and_store(self.store, customer["customer_key"], masked)
         if written_facts:
@@ -204,9 +214,9 @@ class OrchestrationService:
                 result={"sugestoes": [item["topic"] for item in build_suggestions(snapshot)]},
             ))
             await metrics.increment("routing.out_of_scope")
-            trace_url = await self._persist_trace(conversation_id, customer, masked, response, timeline, "orchestrator", {})
+            trace_url = await self._persist_trace(conversation_id, customer, masked, response, timeline, "orchestrator", self._usage(budget), (perf_counter() - started) * 1000, llm_calls=budget.llm_calls)
             await _record_collection_metrics(timeline)
-            return ChatResponse(conversation_id=conversation_id, response=response, active_agent="orchestrator", route_source="fallback", cache_hit=False, timeline=timeline, usage={}, suggestions=build_suggestions(snapshot), langfuse_trace_url=trace_url)
+            return self._response(budget, conversation_id=conversation_id, response=response, active_agent="orchestrator", route_source="fallback", cache_hit=False, timeline=timeline, usage=self._usage(budget), suggestions=build_suggestions(snapshot), langfuse_trace_url=trace_url)
 
         target = decision.target_agent or "order_agent"
         route_source = decision.source
@@ -225,7 +235,7 @@ class OrchestrationService:
             timeline.append(TimelineEvent(category="cache", title=f"Cascata semântica: HIT ({cascade.fonte})", agent=target, collection="short_term_memory" if cascade.fonte == "curto_prazo" else "semantic_cache", op="vectorSearch", filter={"session_id": conversation_id, "agent": target}, result={"hit": True, "fonte": cascade.fonte, "score": cascade.score}))
             response = cascade.answer or ""
             cached_active_agent = cascade.active_agent or target
-            cached_timeline = timeline + [TimelineEvent(**event) for event in cascade.timeline]
+            cached_timeline = timeline + [TimelineEvent(**{**event, "replayed": True}) for event in cascade.timeline]
             # HIT também entra na memória de curto prazo: ela registra a CONVERSA, não o custo.
             await cascade_store_short_term(
                 self.store, target=target, area=customer["area"], customer_key=customer["customer_key"],
@@ -234,9 +244,9 @@ class OrchestrationService:
                 active_agent=cached_active_agent,
             )
             await self._update_conversation(conversation_id, customer, masked, response, cached_active_agent, [], cached_timeline)
-            trace_url = await self._persist_trace(conversation_id, customer, masked, response, cached_timeline, cached_active_agent, {})
+            trace_url = await self._persist_trace(conversation_id, customer, masked, response, cached_timeline, cached_active_agent, self._usage(budget), (perf_counter() - started) * 1000, llm_calls=budget.llm_calls)
             await _record_collection_metrics(cached_timeline)
-            return ChatResponse(conversation_id=conversation_id, response=response, active_agent=cached_active_agent, route_source=route_source, cache_hit=True, cache_source=cascade.fonte, tokens_economizados=cascade.tokens_economizados, timeline=cached_timeline, usage={}, suggestions=await _next_steps(self.store, customer, covered={TOPIC_BY_AGENT.get(cached_active_agent, "")}), langfuse_trace_url=trace_url)
+            return self._response(budget, conversation_id=conversation_id, response=response, active_agent=cached_active_agent, route_source=route_source, cache_hit=True, cache_source=cascade.fonte, tokens_economizados=cascade.tokens_economizados, timeline=cached_timeline, usage=self._usage(budget), suggestions=await _next_steps(self.store, customer, covered={TOPIC_BY_AGENT.get(cached_active_agent, "")}), langfuse_trace_url=trace_url)
         timeline.append(TimelineEvent(category="cache", title="Cascata semântica: MISS (curto prazo + cache global)", agent=target, collection="short_term_memory", op="vectorSearch", filter={"session_id": conversation_id, "agent": target}, result={"hit": False}))
         long_term = await cascade_long_term_context(self.store, customer_key=customer["customer_key"], message=masked)
         if long_term:
@@ -354,10 +364,10 @@ class OrchestrationService:
         usage = {**budget.used_by_agent, "total": budget.total_used, "cache_read": budget.cache_read_tokens, "cache_write": budget.cache_write_tokens}
         await metrics.increment("tokens.total", budget.total_used)
         await metrics.increment("cache.misses")
-        trace_url = await self._persist_trace(conversation_id, customer, masked, response, timeline, current, usage, (perf_counter() - started) * 1000)
+        trace_url = await self._persist_trace(conversation_id, customer, masked, response, timeline, current, usage, (perf_counter() - started) * 1000, llm_calls=budget.llm_calls)
         await _record_collection_metrics(timeline)
         suggestions = await _next_steps(self.store, customer, covered={TOPIC_BY_AGENT.get(current, "")})
-        return ChatResponse(conversation_id=conversation_id, response=response, active_agent=current, route_source=route_source, cache_hit=False, cache_source=None, tokens_economizados=0, timeline=timeline, usage=usage, suggestions=suggestions, langfuse_trace_url=trace_url)
+        return self._response(budget, conversation_id=conversation_id, response=response, active_agent=current, route_source=route_source, cache_hit=False, cache_source=None, tokens_economizados=0, timeline=timeline, usage=usage, suggestions=suggestions, langfuse_trace_url=trace_url)
 
     async def _run_fanout(self, targets: list[str], masked: str, customer: dict, registry: dict, budget: TurnBudget, conversation_id: str, conversation: dict | None, timeline: list[TimelineEvent], started: float) -> ChatResponse:
         """Pattern Parallel Fan-Out/Synthesis: agentes independentes rodam ao mesmo tempo (asyncio.gather), não
@@ -369,11 +379,11 @@ class OrchestrationService:
             timeline.append(TimelineEvent(category="cache", title=f"Cascata semântica: HIT ({cascade.fonte})", collection="short_term_memory" if cascade.fonte == "curto_prazo" else "semantic_cache", op="vectorSearch", filter={"session_id": conversation_id, "agent": fanout_key}, result={"hit": True, "fonte": cascade.fonte, "score": cascade.score}))
             response = cascade.answer or ""
             cached_active_agent = cascade.active_agent or fanout_key
-            cached_timeline = timeline + [TimelineEvent(**event) for event in cascade.timeline]
+            cached_timeline = timeline + [TimelineEvent(**{**event, "replayed": True}) for event in cascade.timeline]
             await self._update_conversation(conversation_id, customer, masked, response, cached_active_agent, [], cached_timeline)
-            trace_url = await self._persist_trace(conversation_id, customer, masked, response, cached_timeline, cached_active_agent, {})
+            trace_url = await self._persist_trace(conversation_id, customer, masked, response, cached_timeline, cached_active_agent, self._usage(budget), (perf_counter() - started) * 1000, llm_calls=budget.llm_calls)
             await _record_collection_metrics(cached_timeline)
-            return ChatResponse(conversation_id=conversation_id, response=response, active_agent=cached_active_agent, route_source="fanout", cache_hit=True, cache_source=cascade.fonte, tokens_economizados=cascade.tokens_economizados, timeline=cached_timeline, usage={}, suggestions=await _next_steps(self.store, customer, covered={"order", "invoice"}), langfuse_trace_url=trace_url)
+            return self._response(budget, conversation_id=conversation_id, response=response, active_agent=cached_active_agent, route_source="fanout", cache_hit=True, cache_source=cascade.fonte, tokens_economizados=cascade.tokens_economizados, timeline=cached_timeline, usage=self._usage(budget), suggestions=await _next_steps(self.store, customer, covered={"order", "invoice"}), langfuse_trace_url=trace_url)
         timeline.append(TimelineEvent(category="cache", title="Cascata semântica: MISS (curto prazo + cache global)", collection="short_term_memory", op="vectorSearch", filter={"session_id": conversation_id, "agent": fanout_key}, result={"hit": False}))
         tail_start = len(timeline)
         timeline.append(TimelineEvent(category="fanout", title="Despacho paralelo", collection="multiagent_brain.routing_rules", op="read", filter={"targets": targets}, result={"agents": targets}))
@@ -410,10 +420,10 @@ class OrchestrationService:
         await metrics.increment("tokens.total", budget.total_used)
         await metrics.increment("fanout.turns")
         await metrics.increment("cache.misses")
-        trace_url = await self._persist_trace(conversation_id, customer, masked, response, timeline, current, usage, (perf_counter() - started) * 1000)
+        trace_url = await self._persist_trace(conversation_id, customer, masked, response, timeline, current, usage, (perf_counter() - started) * 1000, llm_calls=budget.llm_calls)
         await _record_collection_metrics(timeline)
         suggestions = await _next_steps(self.store, customer, covered={"order", "invoice"})
-        return ChatResponse(conversation_id=conversation_id, response=response, active_agent=current, route_source="fanout", cache_hit=False, cache_source=None, tokens_economizados=0, timeline=timeline, usage=usage, suggestions=suggestions, langfuse_trace_url=trace_url)
+        return self._response(budget, conversation_id=conversation_id, response=response, active_agent=current, route_source="fanout", cache_hit=False, cache_source=None, tokens_economizados=0, timeline=timeline, usage=usage, suggestions=suggestions, langfuse_trace_url=trace_url)
 
     async def _update_conversation(self, conversation_id: str, customer: dict, message: str, response: str, active_agent: str, handoffs: list[dict], timeline: list[TimelineEvent] | None = None) -> None:
         """Aplica só o DELTA deste turno via `update_one` atômico — nunca reescreve o documento inteiro.
@@ -461,12 +471,12 @@ class OrchestrationService:
             upsert=True,
         )
 
-    async def _persist_trace(self, conversation_id: str, customer: dict, message: str, response: str, timeline: list[TimelineEvent], active_agent: str, usage: dict, duration_ms: float = 0) -> str | None:
-        await self.store.insert_one("agent_traces", {"conversation_id": conversation_id, "customer_key": customer["customer_key"], "area": customer["area"], "message": message, "response": response, "active_agent": active_agent, "timeline": [event.model_dump(mode="python") for event in timeline], "usage": usage, "duration_ms": round(duration_ms, 2), "at": utcnow()})
+    async def _persist_trace(self, conversation_id: str, customer: dict, message: str, response: str, timeline: list[TimelineEvent], active_agent: str, usage: dict, duration_ms: float = 0, llm_calls: list[dict] | None = None) -> str | None:
+        await self.store.insert_one("agent_traces", {"conversation_id": conversation_id, "customer_key": customer["customer_key"], "area": customer["area"], "message": message, "response": response, "active_agent": active_agent, "timeline": [event.model_dump(mode="python") for event in timeline], "usage": usage, "llm_calls": llm_calls or [], "economics": summarize_calls(llm_calls or []), "duration_ms": round(duration_ms, 2), "at": utcnow()})
         # Uma trace Langfuse por turno cobrindo a timeline inteira (roteamento, cache, cada hop de
         # agente, handoffs, guardrails) — não só a decisão de cache isolada. Best-effort: uma falha
         # aqui nunca derruba a resposta já persistida acima.
         try:
-            return build_turn_trace(conversation_id=conversation_id, customer_key=customer["customer_key"], message=message, response=response, timeline=timeline, active_agent=active_agent, usage=usage)
+            return build_turn_trace(conversation_id=conversation_id, customer_key=customer["customer_key"], message=message, response=response, timeline=timeline, active_agent=active_agent, usage=usage, llm_calls=llm_calls, settings=self.store.settings)
         except Exception:  # noqa: BLE001
             return None

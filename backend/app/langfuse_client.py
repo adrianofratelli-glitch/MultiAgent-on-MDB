@@ -55,11 +55,6 @@ def get_langfuse(settings: Settings | None = None) -> Any:
         return _NoopLangfuse()
 
 
-# TimelineEvent.category -> como virar observação no Langfuse. "agent" vira generation (custou uma
-# chamada de LLM); os demais viram span (decisão/leitura/escrita determinística, sem custo de LLM).
-_GENERATION_CATEGORIES = {"agent"}
-
-
 def build_turn_trace(
     *,
     conversation_id: str,
@@ -69,6 +64,8 @@ def build_turn_trace(
     timeline: list,
     active_agent: str,
     usage: dict | None = None,
+    llm_calls: list[dict] | None = None,
+    settings: Settings | None = None,
 ) -> str | None:
     """Uma trace por turno cobrindo a timeline INTEIRA — roteamento, decisão de cache, cada hop de
     agente (com handoff) e os guardrails — em vez de traces desconexas por decisão isolada. É o que
@@ -78,6 +75,8 @@ def build_turn_trace(
     `message`/`response` chegam aqui já mascarados pelo guardrail de PII (mesma garantia do
     restante do pipeline) — nunca dado cru do cliente.
     """
+    if settings is not None and not settings.langfuse_enabled:
+        return None
     client = get_langfuse()
     trace = client.trace(
         name="multiagent.turn", session_id=conversation_id, user_id=customer_key,
@@ -91,16 +90,24 @@ def build_turn_trace(
         event_filter = getattr(event, "filter", None) if not isinstance(event, dict) else event.get("filter")
         duration_ms = getattr(event, "duration_ms", 0) if not isinstance(event, dict) else event.get("duration_ms", 0)
         name = f"{category}.{agent}" if agent else category
-        if category in _GENERATION_CATEGORIES:
-            trace.generation(
-                name=name, model=None, input=event_filter, output=result,
-                metadata={"title": title, "latency_ms": duration_ms},
-            )
-        else:
-            trace.span(
-                name=name, input=event_filter, output=result,
-                metadata={"title": title, "latency_ms": duration_ms},
-            )
+        replayed = event.get("replayed", False) if isinstance(event, dict) else event.replayed
+        trace.span(
+            name=name, input=event_filter, output=result,
+            metadata={"title": title, "latency_ms": duration_ms, "replayed": replayed},
+        )
+    # Agent activity is not necessarily an LLM call, particularly on cache replay.
+    from datetime import datetime, timedelta
+    for call in llm_calls or []:
+        if call.get("status") == "circuit_open":
+            continue
+        start = datetime.fromisoformat(call["started_at"])
+        trace.generation(
+            name=f"llm.{call['agent']}", model=call["model"],
+            start_time=start, end_time=start + timedelta(milliseconds=call["latency_ms"]),
+            usage={"input": sum(call.get(k, 0) for k in ("input_tokens", "cache_read_tokens", "cache_write_tokens")),
+                   "output": call.get("output_tokens", 0)} if call.get("usage_known") else None,
+            metadata=call,
+        )
     trace.update(output=response)
     try:
         return trace.get_trace_url()

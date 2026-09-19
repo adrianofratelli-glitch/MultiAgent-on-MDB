@@ -1,7 +1,7 @@
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -22,6 +22,31 @@ class Settings(BaseSettings):
     mongodb_brain_db: str = "multiagent_brain"
     anthropic_api_key: str = ""
     anthropic_base_url: str = ""
+    grove_api_key: str = ""
+    grove_anthropic_base_url: str = ""
+    # Full Chat Completions URL supplied by Grove; do not infer paths from model names.
+    grove_chat_completions_url: str = ""
+    grove_openai_models: list[str] = []
+    llm_prices: dict[str, dict[str, float]] = {}
+    llm_blended_prices: dict[str, float] = {}
+
+    @field_validator("llm_blended_prices")
+    @classmethod
+    def valid_blended_prices(cls, prices):
+        import math
+        if any(not math.isfinite(value) or value < 0 for value in prices.values()):
+            raise ValueError("Médias por milhão devem ser finitas e não negativas")
+        return prices
+
+    @field_validator("llm_prices")
+    @classmethod
+    def valid_prices(cls, prices):
+        import math
+        allowed = {"input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens"}
+        for rates in prices.values():
+            if set(rates) - allowed or any(not math.isfinite(v) or v < 0 for v in rates.values()):
+                raise ValueError("Tarifas devem ser finitas, não negativas e usar campos de tokens conhecidos")
+        return prices
     jwt_secret: str = "desenvolvimento-inseguro-troque-este-segredo"
     jwt_ttl_minutes: int = 60
     auth_required: bool = True

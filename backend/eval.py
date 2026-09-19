@@ -14,25 +14,12 @@ import httpx
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from app.config import get_settings  # noqa: E402
+from app.config import Settings, get_settings  # noqa: E402
 from app.database import DataStore, utcnow  # noqa: E402
 from app.seed_data import EVAL_CASES  # noqa: E402
 
 
-BASE = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8031"
-
-
-def token(client: httpx.Client, customer_key: str) -> str:
-    response = client.post("/api/auth/token", json={"customer_key": customer_key})
-    response.raise_for_status()
-    return response.json()["access_token"]
-
-
-def run_case(client: httpx.Client, case: dict) -> dict:
-    headers = {"Authorization": f"Bearer {token(client, case['customer_key'])}"}
-    response = client.post("/api/chat", headers=headers, json={"message": case["message"]})
-    response.raise_for_status()
-    body = response.json()
+def grade_case(case: dict, body: dict) -> dict:
 
     checks: list[tuple[str, bool]] = []
     if case.get("expect_blocked"):
@@ -60,13 +47,6 @@ def run_case(client: httpx.Client, case: dict) -> dict:
     if "expect_handoffs" in case:
         handoffs = sum(1 for event in body.get("timeline", []) if event.get("category") == "handoff")
         checks.append(("handoffs", handoffs == case["expect_handoffs"]))
-    if case.get("expect_write_collection"):
-        writes = {
-            event.get("collection")
-            for event in body.get("timeline", [])
-            if event.get("op") == "write"
-        }
-        checks.append(("business_write", case["expect_write_collection"] in writes))
     if "expect_revisit" in case:
         has_revisit = len(agent_sequence) != len(set(agent_sequence))
         checks.append(("revisit", has_revisit == case["expect_revisit"]))
@@ -81,52 +61,145 @@ def run_case(client: httpx.Client, case: dict) -> dict:
         "route_source": body["route_source"],
         "agent_sequence": agent_sequence,
         "response_preview": body["response"][:200],
+        "cache_hit": body.get("cache_hit", False),
+        "economics": body.get("economics", {}),
+        "llm_calls": body.get("llm_calls", []),
     }
 
 
-async def persist_run(results: list[dict], duration_s: float) -> None:
-    store = DataStore(get_settings())
+BUSINESS_COLLECTIONS = ("orders", "shipments", "loyalty_accounts", "redemptions", "support_tickets", "pending_reviews")
+
+
+async def snapshot(store, customer_key):
+    # Bounded demo fixtures; fail rather than silently truncate an outcome verification.
+    result = {}
+    for collection in BUSINESS_COLLECTIONS:
+        owner_field = "owner_customer_key" if collection in ("orders", "shipments") else "customer_key"
+        docs = await store.find_many(collection, {owner_field: customer_key}, limit=1001)
+        if len(docs) > 1000:
+            raise ValueError("Eval requer fixture isolada com no máximo 1000 documentos por coleção")
+        result[collection] = docs
+    return result
+
+
+def grade_outcome(case, before, after):
+    import re
+    checks = {}
+    collection = case.get("expect_write_collection")
+    if not collection:
+        checks["no_unexpected_business_write"] = before == after
+    elif collection == "orders":
+        order_id = re.search(r"PED-\d+", case["message"]).group()
+        expected_status = "reembolsado" if case["case_id"] == "diego-refund-return" else "troca_solicitada"
+        checks["persisted_order_status"] = any(
+            doc.get("order_id") == order_id and doc.get("status") == expected_status
+            for doc in after["orders"])
+    elif collection == "shipments":
+        order_id = re.search(r"PED-\d+", case["message"]).group()
+        checks["persisted_reschedule"] = any(
+            doc.get("order_id") == order_id and doc.get("reschedule_requested") is True
+            for doc in after["shipments"])
+    elif collection == "support_tickets":
+        previous = {doc.get("ticket_id") for doc in before[collection]}
+        checks["persisted_new_ticket"] = any(
+            doc.get("ticket_id") not in previous and doc.get("status") == "aberto"
+            for doc in after[collection])
+    elif collection == "redemptions":
+        previous = {doc.get("redemption_id") for doc in before[collection]}
+        new = [doc for doc in after[collection] if doc.get("redemption_id") not in previous]
+        before_points = sum(doc["points"] for doc in before["loyalty_accounts"])
+        after_points = sum(doc["points"] for doc in after["loyalty_accounts"])
+        checks["persisted_redemption"] = any(doc.get("reward") == "voucher de R$ 30" and doc.get("points_spent") == 500 and doc.get("status") == "confirmado" for doc in after[collection])
+        checks["balanced_points_debit"] = before_points - after_points == sum(doc["points_spent"] for doc in new)
+    elif collection == "pending_reviews":
+        order_id = re.search(r"PED-\d+", case["message"]).group()
+        checks["persisted_pending_review"] = any(doc.get("status") == "pending" and doc.get("subject_id") == order_id for doc in after[collection])
+    else:
+        checks["outcome_supported"] = False
+    return checks
+
+
+async def run(args):
+    import hashlib
+    import json
+    from app.economics import summarize_evals
+    settings = Settings(_env_file=None, demo_mode=True) if args.offline else get_settings()
+    if not args.offline and settings.use_memory_store:
+        raise ValueError("Use --offline para DEMO_MODE; eval externo exige o mesmo Atlas do servidor")
+    store = DataStore(settings)
     await store.connect()
+    results = []
+    started = time.perf_counter()
     try:
-        passed = sum(1 for r in results if r["passed"])
-        await store.insert_one(
-            "eval_runs",
-            {
-                "at": utcnow(),
-                "total": len(results),
-                "passed": passed,
-                "failed": len(results) - passed,
-                "pass_rate": round(passed / max(1, len(results)), 4),
-                "duration_s": round(duration_s, 2),
-                "results": results,
-            },
-        )
+        if args.offline:
+            from seed import seed
+            from app.llm import LLMGateway
+            from app.orchestration import OrchestrationService
+            await seed(store, create_indexes=False)
+            service = OrchestrationService(store, LLMGateway(settings), settings.global_turn_token_budget)
+        selected = [case for case in EVAL_CASES if not args.case or case["case_id"] in args.case]
+        if not selected:
+            raise ValueError("Nenhum caso selecionado")
+        async with httpx.AsyncClient(base_url=args.url, timeout=180, follow_redirects=False) as client:
+            for trial in range(args.repeats):
+                for case in selected:
+                    case_started = time.perf_counter()
+                    try:
+                        before = await snapshot(store, case["customer_key"])
+                        if args.offline:
+                            turn_started = time.perf_counter()
+                            customer = await store.find_one("customers", {"customer_key": case["customer_key"]})
+                            body = (await service.run_turn(case["message"], customer, None)).model_dump()
+                        else:
+                            auth = await client.post("/api/auth/token", json={"customer_key": case["customer_key"]})
+                            auth.raise_for_status()
+                            turn_started = time.perf_counter()
+                            response = await client.post("/api/chat", headers={"Authorization": f"Bearer {auth.json()['access_token']}"}, json={"message": case["message"]})
+                            response.raise_for_status()
+                            body = response.json()
+                        turn_latency = (time.perf_counter() - turn_started) * 1000
+                        after = await snapshot(store, case["customer_key"])
+                        result = grade_case(case, body)
+                        result["checks"].update(grade_outcome(case, before, after))
+                        result["passed"] = all(result["checks"].values())
+                    except Exception as exc:
+                        turn_latency = (time.perf_counter() - case_started) * 1000
+                        result = {"case_id": case["case_id"], "passed": False, "checks": {}, "error_type": type(exc).__name__}
+                    result.update(trial=trial + 1, latency_ms=round(turn_latency, 2))
+                    results.append(result)
+                    print(f"{'✓' if result['passed'] else '✗'} {result['case_id']} (trial {trial + 1})")
+        report = {"at": utcnow().isoformat(), "label": args.label,
+                  "mode": "offline-contracts" if args.offline else "live",
+                  "dataset_sha256": hashlib.sha256(json.dumps(selected, sort_keys=True).encode()).hexdigest(),
+                  "repeat_policy": "sequential; state and cache preserved; not independent fresh trials",
+                  "duration_s": round(time.perf_counter() - started, 2),
+                  **summarize_evals(results), "results": results}
+        report["measurement_scope"] = "offline contracts; no inference benchmark" if args.offline else "LLM estimated cost; end-to-end chat request latency"
+        if args.offline:
+            report.update(estimated_cost_usd=None, cost_per_success_usd=None, cost_coverage=0)
+        if args.output:
+            Path(args.output).write_text(json.dumps(report, indent=2, ensure_ascii=False))
+        if not args.offline:
+            await store.insert_one("eval_runs", {**report, "at": utcnow()})
+        print(json.dumps({k: v for k, v in report.items() if k != "results"}, indent=2))
+        return 1 if report["failed"] else 0
     finally:
         await store.close()
 
 
-def main() -> None:
-    started = time.perf_counter()
-    results = []
-    with httpx.Client(base_url=BASE, timeout=60) as client:
-        for case in EVAL_CASES:
-            try:
-                result = run_case(client, case)
-            except Exception as exc:
-                result = {"case_id": case["case_id"], "message": case["message"], "passed": False, "checks": {}, "error": str(exc)}
-            results.append(result)
-            mark = "✓" if result["passed"] else "✗"
-            print(f"{mark} {result['case_id']}: {result.get('active_agent', '—')} / {result.get('route_source', '—')}")
-
-    duration = time.perf_counter() - started
-    passed = sum(1 for r in results if r["passed"])
-    print(f"\n{passed}/{len(results)} casos passaram ({round(100 * passed / len(results))}%)")
-
-    asyncio.run(persist_run(results, duration))
-    print("[eval] resultado gravado em eval_runs")
-
-    if passed < len(results):
-        raise SystemExit(1)
+def main():
+    import argparse
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("url", nargs="?", default="http://127.0.0.1:8031")
+    parser.add_argument("--offline", action="store_true", help="Fixtures em memória; sem Atlas ou LLM, valida contratos")
+    parser.add_argument("--repeats", type=int, default=1)
+    parser.add_argument("--label", default="baseline")
+    parser.add_argument("--case", action="append")
+    parser.add_argument("--output")
+    args = parser.parse_args()
+    if args.repeats < 1:
+        parser.error("--repeats deve ser positivo")
+    raise SystemExit(asyncio.run(run(args)))
 
 
 if __name__ == "__main__":
