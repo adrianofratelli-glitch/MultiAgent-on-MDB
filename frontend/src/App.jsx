@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { api } from './api.js';
+import { describeExecution } from './execution.js';
 import Timeline from './components/Timeline.jsx';
 import ReplacementChain from './components/ReplacementChain.jsx';
 import CompliancePage from './components/CompliancePage.jsx';
 
-const NAV = ['Chat', 'Decisões'];
+const NAV = ['Chat', 'Decisões', 'Métricas'];
 // O rótulo do híbrido não cita mais o RRF na aplicação: a fusão passou a rodar server-side
 // com $rankFusion, e o título do evento diz qual dos dois caminhos rodou de fato.
 const OP_LABELS = { read: 'leitura', write: 'escrita', vectorSearch: '$vectorSearch', hybridSearch: 'híbrido BM25 + vetor', changeStream: 'change stream', graphLookup: '$graphLookup' };
@@ -14,28 +15,55 @@ const IDENTITIES = ['ana', 'bruno', 'carla', 'diego'];
 // Langfuse: cascata semântica (curto prazo + semantic_cache, HIT = zero chamada ao LLM,
 // dado real de cascade_lookup) e prompt cache da Anthropic (cache_read/cache_write vêm do
 // budget real do turno, orchestration.py:usage).
-function MongoCacheSavings({ run }) {
+function MongoCacheSavings({ run, timeline = [], agentLabels = {} }) {
   if (!run) return null;
+  const execution = describeExecution(run, timeline);
   const cacheRead = run.usage?.cache_read || 0;
   const cacheWrite = run.usage?.cache_write || 0;
-  const promptTotal = cacheRead + (run.usage?.total || 0);
+  const promptTotal = (run.llm_calls || []).reduce((sum, call) => sum + (call.input_tokens || 0) + (call.cache_read_tokens || 0) + (call.cache_write_tokens || 0), 0);
   const promptPct = promptTotal > 0 ? Math.round((cacheRead / promptTotal) * 100) : 0;
   return (
-    <div className="cache-savings-card">
-      <div className="cache-savings-title">💰 Economia MongoDB neste turno</div>
+    <details className="turn-summary">
+      <summary>
+        <span className="turn-summary-label">Resumo do turno</span>
+        <span><strong>{run.economics?.estimated_cost_usd != null ? `$${run.economics.estimated_cost_usd.toFixed(4)}` : '—'}</strong> <span className="dim">USD estimados</span></span>
+        <span>{run.cache_hit ? 'Resposta em cache' : 'Nova resposta'}</span>
+        <span>{execution.calls.length} chamadas</span>
+        {!run.cache_hit && (execution.parallel || execution.sequential) && <span className="execution-flag">{execution.label}</span>}
+        <span className="turn-summary-more">Detalhes</span>
+      </summary>
+      <div className="turn-summary-body">
       <div className="cache-savings-row">
         <span>Cascata semântica (curto prazo + Atlas Vector Search)</span>
         {run.cache_hit
-          ? <b className="cache-savings-hit">HIT ({run.cache_source}) — 0 chamadas ao LLM (~{run.tokens_economizados ?? 0} tokens evitados)</b>
-          : <span className="dim">MISS — resposta gerada pelo LLM</span>}
+          ? <b className="cache-savings-hit">HIT ({run.cache_source}) — resposta reaproveitada (~{run.tokens_economizados ?? 0} tokens estimados evitados)</b>
+          : <span className="dim">MISS — execução do fluxo</span>}
       </div>
+      <div className="cache-savings-row">
+        <span>Custo estimado de LLM neste turno</span>
+        <b>{run.economics?.estimated_cost_usd != null ? `$${run.economics.estimated_cost_usd.toFixed(6)} USD` : 'Não disponível — tarifa ou consumo ausente'}</b>
+      </div>
+      {run.economics?.cost_bases?.includes('historical_blended_estimate') && <small>Estimativa pelas médias observadas por modelo no Grove; não representa cobrança exata.</small>}
+      <div className="cache-savings-row">
+        <span>{execution.label}</span>
+        <span>{execution.calls.length} chamadas · {[...new Set(execution.calls.map(c => `${agentLabels[c.agent] || c.agent}: ${c.model}`))].join(' · ') || 'Sem chamada ao modelo'}</span>
+      </div>
+      {execution.parallel && !run.cache_hit && <small>{execution.overlaps ? 'Chamadas a modelos diferentes se sobrepuseram no tempo. Pedido e fatura são consultas independentes; os resultados são reunidos na resposta.' : 'Agentes despachados em paralelo; sem evidência de chamadas simultâneas a modelos diferentes neste turno.'}</small>}
+      {execution.calls.some(c => c.fallback) && <small>Modelo alternativo acionado (fallback). Consulte as chamadas abaixo para identificar o agente.</small>}
+      {!!run.llm_calls?.length && <details><summary>Consumo por chamada</summary>
+        {run.llm_calls.map((call, i) => <div className="cache-savings-row" key={i}>
+          <span>{call.agent} · {call.model}{call.fallback ? ' · fallback' : ''}</span>
+          <span>{call.status} · {Math.round(call.latency_ms || 0)} ms · {call.usage_known ? `${(call.input_tokens || 0) + (call.cache_read_tokens || 0) + (call.cache_write_tokens || 0)} entrada / ${call.output_tokens || 0} saída` : 'consumo não informado'}</span>
+        </div>)}
+      </details>}
       {cacheRead > 0 && (
         <div className="cache-savings-row">
-          <span>Prompt cache (Anthropic, prefixo ancorado em documento do MongoDB)</span>
+          <span>Prompt cache do provedor</span>
           <b className="cache-savings-hit">{cacheRead} tokens reaproveitados ({promptPct}% deste turno{cacheWrite ? `, ${cacheWrite} escritos no cache` : ''})</b>
         </div>
       )}
-    </div>
+      </div>
+    </details>
   );
 }
 
@@ -189,7 +217,9 @@ function MetricsPage({ metrics, evalRuns, adminMode }) {
         {adminMode && evalRuns.map((run) => (
           <div className="eval-run" key={run.at}>
             <b className={run.pass_rate === 1 ? 'ok' : ''}>{Math.round(run.pass_rate * 100)}%</b>
-            <span>{run.passed}/{run.total} casos</span>
+            <span>{run.passed}/{run.total} casos · {run.label || 'baseline'}</span>
+            <span>p95: {run.p95_ms != null ? `${Math.round(run.p95_ms)} ms` : '—'}</span>
+            <span>USD por sucesso: {run.cost_per_success_usd != null ? run.cost_per_success_usd.toFixed(6) : 'não disponível'}</span>
             <code>{new Date(run.at).toLocaleString('pt-BR')}</code>
           </div>
         ))}
@@ -247,7 +277,7 @@ export default function App() {
         // sem isso a conversa retomada mostra o texto certo mas raio-x/esteira vazios — parece que o
         // multi-agent não rodou, quando só faltava recarregar o registro do último turno.
         setTimeline(lastConv.last_timeline || []);
-        setLastRun(lastConv.last_timeline ? { active_agent: lastConv.active_agent, usage: lastConv.last_usage || {} } : null);
+        setLastRun(lastConv.last_timeline ? { active_agent: lastConv.active_agent, usage: lastConv.last_usage || {}, llm_calls: lastConv.last_llm_calls || [], economics: lastConv.last_economics || {} } : null);
       } else {
         setConversationId(null); setMessages([]); setTimeline([]); setLastRun(null); setSuggestions([]);
       }
@@ -341,7 +371,7 @@ export default function App() {
   const collectionsTouched = useMemo(() => {
     const byCollection = new Map();
     for (const event of timeline || []) {
-      if (!event.collection || !event.op) continue;
+      if (!event.collection || !event.op || event.replayed) continue;
       if (!byCollection.has(event.collection)) byCollection.set(event.collection, []);
       byCollection.get(event.collection).push({ op: event.op, agent: event.agent, title: event.title });
     }
@@ -355,8 +385,17 @@ export default function App() {
       <main id="conteudo-principal" tabIndex={-1} className="content">
         {error && <div className="error-banner">{error}<button aria-label="Fechar aviso" onClick={() => setError('')}>×</button></div>}
         {nav === 'Chat' && <>
-          <header className="stage-header"><div><span>coordenação no Atlas</span><h1>Agentes em ação.</h1></div><div className="turn-state"><code>{conversationId || 'novo turno'}</code><b>{lastRun?.active_agent || 'aguardando'}</b>{lastRun?.langfuse_trace_url && <a href={lastRun.langfuse_trace_url} target="_blank" rel="noreferrer" className="langfuse-link" title="Abrir trace completo da cadeia de agentes (tokens, custo, latência por hop) no Langfuse">🔭 Ver trace no Langfuse ↗</a>}<button className="new-conversation-btn" onClick={newConversation} disabled={busy}>Nova conversa</button></div></header>
-          <MongoCacheSavings run={lastRun} />
+          <header className="stage-header"><div><h1>Agentes em ação.</h1></div>
+            <div className="turn-actions">
+              <details className="session-details"><summary>Detalhes da sessão</summary><div>
+                <code>{conversationId || 'Nova sessão'}</code>
+                <span>{agentLabels[lastRun?.active_agent] || lastRun?.active_agent || 'Aguardando mensagem'}</span>
+                {lastRun?.langfuse_trace_url && <a href={lastRun.langfuse_trace_url} target="_blank" rel="noreferrer">Abrir trace no Langfuse ↗</a>}
+              </div></details>
+              <button className="new-conversation-btn" onClick={newConversation} disabled={busy}>Nova conversa</button>
+            </div>
+          </header>
+          <MongoCacheSavings run={lastRun} timeline={timeline} agentLabels={agentLabels} />
           {cast.length > 0 && (
             <div className="agent-cast" title={lastRun?.route_source === 'fanout' ? 'Agentes despachados em paralelo (fan-out), não em cadeia' : 'Agentes que participaram deste turno, em ordem de atuação'}>
               <span className="agent-cast-label">{lastRun?.route_source === 'fanout' ? 'despacho paralelo' : 'agentes em ação'}</span>
@@ -375,8 +414,8 @@ export default function App() {
             </div>
           )}
           {collectionsTouched.length > 0 && (
-            <div className="collections-panel" title="Collections do MongoDB tocadas neste turno, com o tipo de operação">
-              <span className="collections-panel-label">coleções em ação neste turno</span>
+            <details className="collections-panel">
+              <summary>Dados consultados · {collectionsTouched.length} coleções</summary>
               <div className="collections-panel-grid">
                 {collectionsTouched.map(([collection, ops]) => (
                   <div className="collection-chip" key={collection}>
@@ -389,11 +428,12 @@ export default function App() {
                   </div>
                 ))}
               </div>
-            </div>
+            </details>
           )}
           <ReplacementChain timeline={timeline} />
           <div className="workspace workspace--focus"><ChatPanel key={customer?.customer_key} {...{ messages, input, setInput, send, busy, suggestions }} customerName={customer?.name} demos={demoScenarios} onSuggestion={(message) => send(message)} /><section className="timeline-panel"><div className="panel-label"><span>execução</span><code>{timeline.length} eventos</code></div><Timeline events={timeline} /></section></div>
         </>}
+        {nav === 'Métricas' && <MetricsPage metrics={metrics} evalRuns={evalRuns} adminMode={adminMode} />}
         {nav === 'Decisões' && <CompliancePage adminMode={adminMode} setAdminMode={setAdminMode} customerKey={customer?.customer_key} />}
       </main>
     </div>

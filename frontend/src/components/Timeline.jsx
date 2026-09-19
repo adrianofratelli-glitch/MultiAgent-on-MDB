@@ -27,8 +27,9 @@ export default function Timeline({ events }) {
           <div className="event-card">
             <div className="event-heading">
               <span className={`category-badge ${event.category}`}>{CATEGORY_LABELS[event.category]}</span>
+              {event.replayed && <small>Histórico do cache · não executado neste turno</small>}
               {event.agent && <code>{event.agent}</code>}
-              {event.duration_ms > 0 && <small>{Math.round(event.duration_ms)} ms</small>}
+              {!event.replayed && event.duration_ms > 0 && <small>{Math.round(event.duration_ms)} ms</small>}
             </div>
             <h4>{event.title}</h4>
             {event.collection && <div className="mongo-operation"><span>MongoDB</span><code>{event.collection}</code></div>}
