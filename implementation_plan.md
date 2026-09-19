@@ -8,8 +8,8 @@ A tese: **não precisa de fila, workflow engine e vector DB separados pra orques
 
 | Arquivo | O que responde |
 |---|---|
-| [`docs/briefing/01-arquitetura.md`](docs/briefing/01-arquitetura.md) | os oito agentes, roteamento determinístico-primeiro, cadeia/retorno controlado/fan-out, guardrail em três camadas, gateway LLM, segurança, escritas reais, `DEMO_MODE`, ordem de trabalho |
-| [`docs/briefing/02-mongodb.md`](docs/briefing/02-mongodb.md) | as duas bases, a estratégia de embedding (autoEmbed voyage-4 1024d cosine `flat`), os 8 índices vetoriais + o lexical com seus campos `filter`, índices regulares/únicos/TTL, validadores `$jsonSchema`, e **todas as queries com o pipeline colado** — a cascata com `$unionWith`, guardrail semântico, ranking ponderado do catálogo, híbrido BM25+vetor com RRF, supersessão, escritas dos agentes e o Change Stream |
-| [`docs/briefing/03-interface-fluxos.md`](docs/briefing/03-interface-fluxos.md) | as duas abas, a anatomia da aba Chat, contrato de API e streaming, os sete cenários por identidade, roteiro de demo |
+| [`docs/briefing/architecture.md`](docs/briefing/architecture.md) | os oito agentes, roteamento determinístico-primeiro, cadeia/retorno controlado/fan-out, guardrail em três camadas, gateway LLM, segurança, escritas reais, `DEMO_MODE`, ordem de trabalho |
+| [`docs/briefing/queries.md`](docs/briefing/queries.md) | as duas bases, a estratégia de embedding (autoEmbed voyage-4 1024d cosine `flat`), os 8 índices vetoriais + o lexical com seus campos `filter`, índices regulares/únicos/TTL, validadores `$jsonSchema`, e **todas as queries com o pipeline colado** — a cascata com `$unionWith`, guardrail semântico, ranking ponderado do catálogo, híbrido BM25+vetor com RRF, supersessão, escritas dos agentes e o Change Stream |
+| [`docs/briefing/ui-flows.md`](docs/briefing/ui-flows.md) | as duas abas, a anatomia da aba Chat, contrato de API e streaming, os sete cenários por identidade, roteiro de demo |
 
 Se for ler só um: o **01**, pela regra de roteamento. LLM sobrepondo decisão determinística torna a demo não-reprodutível.

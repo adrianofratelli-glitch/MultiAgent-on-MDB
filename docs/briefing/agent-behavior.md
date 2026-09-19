@@ -1,0 +1,164 @@
+# Comportamento multiagente — roteamento, handoff, memória, "checkpoint"
+
+## Aviso importante: isto NÃO é LangGraph
+
+`.claude/rules/scope.md` (herda de `../../CLAUDE.md`) descreve o projeto como "8 agentes LangGraph coordenando via Atlas". **Verificado no código, isso está errado**:
+
+```
+grep -rn "langgraph\|StateGraph\|MongoDBSaver\|checkpointer\|add_node\|add_edge\|add_conditional_edges" backend/
+→ (nenhum resultado)
+
+cat backend/requirements.txt
+→ fastapi, uvicorn, pymongo, anthropic, PyJWT, pydantic-settings,
+  python-multipart, httpx, pytest, pytest-asyncio, langfuse
+  (SEM langgraph)
+```
+
+O que existe de fato é uma **orquestração multiagente escrita à mão em Python assíncrono puro**, em `backend/app/orchestration.py` (`OrchestrationService.run_turn`), com um loop `for hop in range(MAX_HOPS)` fazendo o papel do que um `StateGraph.add_conditional_edges` faria num LangGraph real. Isso é funcionalmente um grafo de agentes (nós = agentes, arestas = handoffs condicionais, estado persistido), mas **sem o framework** — sem `checkpointer`, sem `MongoDBSaver`, sem `Command`/`interrupt`. Se o cliente perguntar "como vocês fazem checkpoint no LangGraph", a resposta correta é: "não usamos o framework LangGraph nesta PoV — construímos a mesma ideia (grafo de agentes com estado persistido no MongoDB) à mão, e aqui está exatamente onde/como".
+
+Se este for um requisito real do cliente (querer ver LangGraph especificamente), é um gap de escopo a resolver com quem definiu o scope.md — não algo para inventar na documentação.
+
+---
+
+## Os 8 "nós" do grafo
+
+Definidos como documentos em `multiagent_brain.agent_registry` (seed em `backend/app/seed_data.py:114-121`), carregados uma vez no início de cada turno (`orchestration.py:104-114`, `registry = {agent["agent_key"]: agent for agent in agents}`):
+
+| agent_key | Papel | Modelo | Tools | Budget (tokens/turno) | Escreve? |
+|---|---|---|---|---|---|
+| `orchestrator` | Classifica intenção e roteia quando a regra determinística não resolve; nunca responde direto ao cliente | claude-haiku-4-5 | `route`, `consolidate` | 2600 | não |
+| `order_agent` | Status, troca, reembolso de pedido do titular autenticado | claude-haiku-4-5 | `read_order`, `update_order_status` | 4000 | **sim** — único agente com escrita restrita a status aprovado |
+| `product_agent` | Recomendação via busca vetorial no catálogo | claude-haiku-4-5 | `vector_search_products` | 4500 | não |
+| `support_agent` | Diagnóstico técnico via RAG híbrido na KB | claude-haiku-4-5 | `hybrid_search_kb`, `handoff` | 4500 | **sim** — abre `support_tickets` em escalonamento explícito |
+| `billing_agent` | Fatura, somente leitura | claude-haiku-4-5 | `read_invoice` | 4000 | não |
+| `warranty_agent` | Cobertura de garantia, calculada + `$graphLookup` de reposição | claude-haiku-4-5 | `read_warranty_policy`, `read_order` | 4000 | não (leitura, quem efetiva é `order_agent`) |
+| `loyalty_agent` | Saldo/tier/resgate de pontos | claude-haiku-4-5 | `read_loyalty_account` | 4000 | **sim** — `$inc` restrito em pontos, tabela fixa de recompensas |
+| `logistics_agent` | Transportadora, rastreio, reagendamento | claude-haiku-4-5 | `read_shipment` | 4000 | **sim** — só o campo `reschedule_requested` |
+
+**Config é dado, não código**: qualquer campo acima é editável em runtime via `PATCH /api/admin/agents/{agent_key}` (sem redeploy) — a tela "Agentes" no frontend edita literalmente esse documento.
+
+`WRITE_EFFECT_AGENTS = {"loyalty_agent", "order_agent", "logistics_agent", "support_agent"}` (`orchestration.py:54`) — para esses 4, uma checagem extra direto no banco roda antes de CADA runner no meio de uma cadeia de handoff (não só no início do turno), porque o `registry` carregado no início pode estar desatualizado se um admin desativar o agente no meio do turno. Agentes só-leitura confiam no snapshot do início, porque o custo da consulta extra não compensa ali.
+
+---
+
+## Roteamento (a aresta condicional de entrada)
+
+`backend/app/router.py`, chamado em `orchestration.py:118,151-193`.
+
+1. **`cheap_route`** (determinístico, gratuito) — casa keywords normalizadas (sem acento, minúsculo) contra `routing_rules` (coleção seedada com `keywords`, `target_agent`, `priority`). Empates de prioridade+contagem entre agentes DIFERENTES retornam `None` (não decide sozinho, delega ao orquestrador). Prioridade primeiro, contagem de keyword como desempate — nessa ordem, para que uma intenção específica ("garantia") não perca para uma genérica que casa 2 palavras ("pedido" + "PED-").
+2. Se `cheap_route` não resolve: **`deterministic_orchestrator`** tenta por família de palavra (defeito → suporte, produto/categoria → produto, fatura → cobrança, fallback → pedido, confiança 0.55).
+3. Só se isso também for puro fallback E a mensagem tiver algum sinal de domínio (`has_domain_signal`) o **LLM classificador** é chamado (`orchestrator` agent, prompt fechado, uma linha de resposta, chave só). **O LLM nunca sobrescreve uma decisão determinística já confiante** — decisão explícita para manter reprodutibilidade (sampling variance quebrava roteamento em mensagens quase idênticas).
+4. Sem sinal de domínio nenhum → `fora_de_escopo`, resposta do orquestrador ancorada nos dados reais do cliente (nunca um "não entendi" genérico).
+
+**Fan-out paralelo** (`detect_fanout`, `router.py:63-82`): se a mensagem bate keyword de `order_agent` E `billing_agent` ao mesmo tempo (e SÓ esse par — qualquer outro agente no meio aborta o fan-out), os dois rodam em `asyncio.gather` de verdade, não em cadeia — é o único caso de paralelismo real no sistema (`orchestration.py:_run_fanout`).
+
+---
+
+## O loop de handoff (o "grafo" em si)
+
+`orchestration.py:270-330`, dentro de `run_turn`.
+
+```python
+current = target          # agente inicial, decidido pelo roteamento
+visit_counts = {current: 1}
+handoff_path = [current]
+for hop in range(MAX_HOPS):          # MAX_HOPS = 5
+    runner = RUNNERS.get(current)
+    result = await runner(store, message, customer, llm, budget, agent_doc, hint, turn_context)
+    # ... eventos, resposta acumulada ...
+    if not result.handoff_to or hop == MAX_HOPS - 1:
+        break
+    destination = result.handoff_to
+    # trava de ciclo / revisita / registro do handoff ...
+    current = destination
+```
+
+- Cada `runner` (uma função por agente em `agents.py`, registradas em `RUNNERS`) devolve um `AgentResult` com `response`, `event` (para a timeline), e opcionalmente `handoff_to` + `handoff_reason` — é o agente decidindo, dentro da própria lógica de negócio, se quer passar a bola.
+- **Trava de ciclo**: `ALLOWED_REVISITS = {("logistics_agent", "order_agent")}` e `MAX_VISITS_PER_AGENT = 2` — só uma dependência de negócio explícita (logística confirmando de volta com pedidos) pode revisitar um agente já visitado; qualquer outro ciclo aborta com uma resposta explicando o corte, nunca um loop infinito silencioso.
+- **`FALLBACK_AGENTS`** — se o handoff pedido for para um agente desativado/ausente do registry, cai num agente vizinho razoável em vez de quebrar o turno.
+- Cada handoff é **persistido antes de acontecer** — `insert_one("agent_handoffs", {...})` — e alimenta o Change Stream que a UI consome ao vivo (`watch_handoffs`).
+
+### Exemplos de cadeias reais no código
+
+- `support_agent` diagnostica → handoff para `product_agent` recomendar → se o cliente confirma "quero trocar", `product_agent` faz handoff para `order_agent` efetivar (única escrita real de troca).
+- `order_agent` processa troca → se a mensagem também menciona fatura/entrega, handoff para `billing_agent` ou `logistics_agent`.
+- `logistics_agent` reagenda entrega → se o cliente pediu confirmação final do pedido, handoff de volta para `order_agent` (o único revisit permitido).
+
+---
+
+## Estado do turno — o que faz as vezes de "state schema"
+
+Não há um `TypedDict`/`Pydantic State` compartilhado entre nós como num `StateGraph` real. O estado é reconstruído por turno em duas camadas:
+
+**`turn_context` (dict, transitório, só dentro do loop de hops)** — `orchestration.py:291-298`:
+```python
+{
+    "conversation_id": str,
+    "active_order_id": str | None,       # último pedido tocado NESTA conversa
+    "active_invoice_id": str | None,
+    "handoff_path": list[str],           # trilha de agentes já visitados neste turno
+    "visit_counts": dict[str, int],
+    "returning_from": str | None,        # agente anterior, se for um revisit
+}
+```
+
+**`agent_conversations` (documento MongoDB persistente, é o estado durável entre turnos)** — atualizado via `$push`/`$each`/`$slice: -20` (nunca `replace_one` do documento inteiro, para não perder turnos concorrentes):
+```
+{
+  conversation_id, customer_key, active_agent, active_order_id, active_invoice_id,
+  turns: [{role, content, at}, ...]          (até 20, corte no servidor)
+  handoff_chain: [{from_agent, to_agent, reason, at}, ...] (até 20)
+  updated_at
+}
+```
+
+---
+
+## "Checkpointer" — o que existe de fato
+
+Não há `MongoDBSaver` (esse é um checkpointer específico do LangGraph). O que existe, com o mesmo efeito prático de checkpoint/persistência de estado do agente:
+
+| Collection | Papel de checkpoint | TTL |
+|---|---|---|
+| `agent_conversations` | Estado durável da conversa entre turnos — é o que permite retomar (`GET /api/conversations/latest`) e o que os agentes leem como contexto (`active_order_id`/`active_invoice_id`, últimas 6 mensagens) | **86400s (24h)**, índice em `updated_at` |
+| `agent_handoffs` | Log de cada transição de agente — auditável, alimenta Change Stream ao vivo | **30 dias**, índice `(conversation_id, at)` e `(at)` |
+| `agent_traces` | Snapshot completo do turno (timeline inteira, usage, custo) — persistido em `_persist_trace`, chamado nos 6 caminhos de saída de `run_turn`/`_run_fanout` | **30 dias**, índice `(conversation_id, at)` e `(at)` |
+| `short_term_memory` | Cache de curto prazo por sessão (pergunta → resposta já processada) — funciona como um "replay" de turno já resolvido | TTL dinâmico, **24h fixas na escrita** (`expires_at`) |
+
+Ou seja: o "checkpoint" aqui é manual, feito com `insert_one`/`update_one` explícitos no ponto certo do fluxo, não uma abstração de framework que serializa o grafo inteiro automaticamente a cada nó. Uma conversa retomada relê `agent_conversations` + o último `agent_traces` para repopular a timeline visual — é o equivalente funcional de "restaurar um checkpoint", mas escrito à mão.
+
+---
+
+## Memória de curto e longo prazo
+
+**Curto prazo** (`short_term_memory`, `cascade.py`) — por sessão (`session_id` = `conversation_id`), pergunta→resposta com timeline completa, TTL 24h. Serve dois papéis: cache (evita repetir LLM na mesma sessão) E registro de conversa (mesmo em cache HIT, grava de novo — é o histórico, não só o custo evitado).
+
+**Longo prazo** (`long_term_memory`, `cascade.py:115-144`) — cross-sessão, por `customer_key`, sem TTL. Grava um episódio (pergunta+resposta) ao final de todo turno completo (`cascade_store_episode`), e é recuperado via `$vectorSearch` para virar contexto de prompt (`cascade_long_term_context`) — nunca é resposta pronta, só pano de fundo.
+
+**Fatos extraídos** (`customer_memory`, `memory.py`) — camada separada, mais estruturada: regras simples detectam sinais como "sensível a preço" ou "relatou defeito" na mensagem, e gravam com **supersessão transacional** (fato antigo marcado `active: False` + novo documento inserido) — nunca sobrescreve, sempre um novo registro histórico. `product_agent` lê esse fato para enviesar recomendação por preço.
+
+---
+
+## Tools por agente
+
+Não são "tools" no sentido de tool-calling do LLM (function calling) — são identificadores de capacidade no documento `agent_registry` (`allowed_tools`), e a lógica de cada tool é código Python determinístico dentro do runner correspondente (`agents.py`), nunca decidida pelo modelo:
+
+- `read_order` / `update_order_status` → `run_order_agent`
+- `vector_search_products` → `run_product_agent` → `search_products` (`$vectorSearch`)
+- `hybrid_search_kb` / `handoff` → `run_support_agent` → `search_kb` (`$rankFusion`/RRF)
+- `read_invoice` → `run_billing_agent`
+- `read_warranty_policy` / `read_order` → `run_warranty_agent` (+ `$graphLookup` de reposição)
+- `read_loyalty_account` → `run_loyalty_agent`
+- `read_shipment` → `run_logistics_agent`
+
+O LLM (`llm_synthesize`, `agents.py:43-50`) entra só DEPOIS que o dado já foi buscado — ele redige a frase final sobre o documento já retornado, nunca decide a query. Isso é uma decisão de segurança deliberada: ownership e filtros nunca dependem do raciocínio do modelo.
+
+---
+
+## Guardrails no fluxo do "grafo"
+
+Guardrail de entrada roda ANTES do roteamento (3 camadas: denylist estático → denylist vetorial via Atlas Vector Search → classificador LLM, ver `queries.md` §1.5) — se bloqueia, o turno termina ali, sem tocar nenhum agente. Guardrail de saída roda DEPOIS que a cadeia de handoff termina, checando vazamento de segredo/marcador interno na resposta final.
+
+## Observabilidade da cadeia
+
+`build_turn_trace` (`langfuse_client.py`) grava **uma trace Langfuse por turno inteiro** — não por hop isolado — com um `span` por evento da timeline (roteamento, cache, cada hop de agente, handoff, guardrail) e uma `generation` por chamada real de LLM. Fail-open: sem chave Langfuse configurada vira no-op (`_NoopLangfuse`), nunca derruba o turno. `message`/`response` chegam já mascarados de PII antes de qualquer envio ao Langfuse. **Nunca mencionar Postgres em call/demo com cliente** — é infra interna do self-host do Langfuse, invisível ao valor da PoV.
