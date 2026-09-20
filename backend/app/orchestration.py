@@ -140,9 +140,9 @@ class OrchestrationService:
             await _record_collection_metrics(timeline)
             return self._response(budget, conversation_id=conversation_id, response=response, active_agent="guardrail", route_source="fallback", cache_hit=False, timeline=timeline, usage=self._usage(budget), suggestions=build_suggestions(snapshot), langfuse_trace_url=trace_url)
 
-        written_facts = await extract_and_store(self.store, customer["customer_key"], masked)
+        written_facts = await extract_and_store(self.store, customer["customer_key"], masked, llm=self.llm, budget=budget, agent_doc=registry.get("orchestrator"))
         if written_facts:
-            timeline.append(TimelineEvent(category="memory", title="Fato extraído do turno e persistido (supersessão)", collection="customer_memory", op="write", filter={"customer_key": customer["customer_key"]}, result=written_facts))
+            timeline.append(TimelineEvent(category="memory", title="Fato extraído do turno e persistido (LLM + supersessão)", collection="customer_memory", op="write", filter={"customer_key": customer["customer_key"]}, result=written_facts))
 
         fanout_targets = detect_fanout(masked, rules)
         if fanout_targets and all(target in registry for target in fanout_targets):
@@ -358,7 +358,7 @@ class OrchestrationService:
             active_agent=current,
             cache_eligible=cache_eligible,
         )
-        await cascade_store_episode(self.store, customer_key=customer["customer_key"], message=masked, answer=response)
+        await cascade_store_episode(self.store, customer_key=customer["customer_key"], intent=decision.intent, agent=current)
         timeline.append(TimelineEvent(category="memory", title="Episódio gravado em memória de longo prazo", agent=current, collection="long_term_memory", op="write", filter={"customer_key": customer["customer_key"]}, result={}))
         await self._update_conversation(conversation_id, customer, masked, response, current, handoff_chain, timeline)
         usage = {**budget.used_by_agent, "total": budget.total_used, "cache_read": budget.cache_read_tokens, "cache_write": budget.cache_write_tokens}

@@ -135,7 +135,7 @@ Ou seja: o "checkpoint" aqui é manual, feito com `insert_one`/`update_one` expl
 
 **Longo prazo** (`long_term_memory`, `cascade.py:115-144`) — cross-sessão, por `customer_key`, sem TTL. Grava um episódio (pergunta+resposta) ao final de todo turno completo (`cascade_store_episode`), e é recuperado via `$vectorSearch` para virar contexto de prompt (`cascade_long_term_context`) — nunca é resposta pronta, só pano de fundo.
 
-**Fatos extraídos** (`customer_memory`, `memory.py`) — camada separada, mais estruturada: regras simples detectam sinais como "sensível a preço" ou "relatou defeito" na mensagem, e gravam com **supersessão transacional** (fato antigo marcado `active: False` + novo documento inserido) — nunca sobrescreve, sempre um novo registro histórico. `product_agent` lê esse fato para enviesar recomendação por preço.
+**Fatos extraídos** (`customer_memory`, `memory.py`) — camada separada, mais estruturada: um LLM barato extrai fatos duráveis em 3ª pessoa (só quando um portão de frases sem regex vê sinal de identidade/preferência), com deduplicação por `fact_norm`, descarte determinístico de fato em formato de instrução (`looks_like_instruction`) e falha fechada; grava com **supersessão transacional** (fato antigo marcado `active: False` + novo documento inserido) — nunca sobrescreve, sempre um novo registro histórico. O orçamento é o campo estruturado `max_price_brl`, que `product_agent` lê no servidor para limitar o catálogo. O episódio de longo prazo guarda só rótulos (intent + agente), nunca a pergunta/resposta crua.
 
 ---
 

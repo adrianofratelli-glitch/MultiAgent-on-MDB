@@ -8,7 +8,7 @@ from typing import Any
 
 from .database import DataStore, run_in_transaction_with_retry, utcnow
 from .guidance import customer_snapshot, format_options, no_data_reply
-from .memory import active_facts
+from .memory import active_budget
 from .models import TimelineEvent
 from .policies import public_document, safe_invoice_filter, safe_order_read_filter, safe_order_update, safe_shipment_filter
 from .decisions import build_decision_doc, record_decision
@@ -625,11 +625,11 @@ async def search_products(store: DataStore, message: str, max_price: float | Non
 
 async def run_product_agent(store: DataStore, message: str, customer: dict, llm=None, budget=None, agent_doc=None, scope_hint: str = "", context: dict | None = None) -> AgentResult:
     started = perf_counter()
-    facts = await active_facts(store, customer["customer_key"])
+    budget_brl = await active_budget(store, customer["customer_key"])
     category = detect_category(message)
     explicit_price = parse_price_ceiling(message)
-    memory_bias = "price_sensitive" in facts and explicit_price is None
-    max_price = explicit_price if explicit_price is not None else (350.0 if ("mais barato" in normalize(message) or memory_bias) else None)
+    memory_bias = budget_brl is not None and explicit_price is None
+    max_price = explicit_price if explicit_price is not None else (budget_brl if memory_bias else (350.0 if "mais barato" in normalize(message) else None))
     products = await search_products(store, message, max_price, category)
     if not products and category:
         # teto de preço pode ter zerado a categoria certa; melhor mostrar algo da categoria do que nada.
@@ -642,7 +642,7 @@ async def run_product_agent(store: DataStore, message: str, customer: dict, llm=
         lines = [f"- **{item['name']}** — R$ {item['price']:.2f} · ★{item.get('rating', '—')} · {item.get('stock', 0)} em estoque" for item in products[:3]]
         response = "Encontrei estas opções no catálogo:\n" + "\n".join(lines)
         if memory_bias:
-            response += "\n\n(Levei em conta que você já demonstrou preferência por preços mais baixos.)"
+            response += f"\n\n(Levei em conta o seu orçamento de até R$ {budget_brl:.2f}.)"
     elif category:
         # Sem opção na categoria+orçamento: diz o que existe de fato na categoria em vez
         # de encerrar. As faixas vêm de query, não de estimativa.
@@ -677,7 +677,7 @@ async def run_product_agent(store: DataStore, message: str, customer: dict, llm=
     event = TimelineEvent(category="agent", title="Recomendação com ranking ponderado (relevância + nota + estoque)" + (" + modelo" if synthesized else ""), agent="product_agent", collection="products_catalog", op="vectorSearch", filter=search_filter, result=products[:3], duration_ms=(perf_counter() - started) * 1000)
     events = [event]
     if memory_bias:
-        events.append(TimelineEvent(category="memory", title="Viés aplicado a partir da memória do cliente", agent="product_agent", collection="customer_memory", filter={"customer_key": customer["customer_key"], "fact_type": "price_sensitive"}, result={"fact": facts["price_sensitive"]}))
+        events.append(TimelineEvent(category="memory", title="Viés aplicado a partir da memória do cliente", agent="product_agent", collection="customer_memory", filter={"customer_key": customer["customer_key"], "max_price_brl": {"$gt": 0}}, result={"max_price_brl": budget_brl}))
     final_response = synthesized or response
     # 3º hop da cadeia: cliente já pediu diagnóstico (support_agent) e recomendação (aqui) — se também confirmou
     # querer efetivar a troca, quem processa isso com segurança é o order_agent (única escrita do sistema).

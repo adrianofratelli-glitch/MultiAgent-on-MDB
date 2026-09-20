@@ -41,7 +41,7 @@ PoV de atendimento ao cliente multiagente onde o **MongoDB Atlas é tanto o data
 
 1. **Entrada** — `POST /api/chat`, JWT decodifica `customer_key` (nunca vem do payload).
 2. **Guardrail de entrada** — denylist estático → denylist vetorial (Atlas Vector Search) → LLM classificador (só se necessário).
-3. **Extração de memória** — fatos simples (`price_sensitive`, `product_complaint`) extraídos da mensagem e gravados com supersessão transacional em `customer_memory`.
+3. **Extração de memória** — fatos em 3ª pessoa extraídos por LLM (com `max_price_brl` estruturado para orçamento), deduplicados e gravados com supersessão transacional em `customer_memory`.
 4. **Roteamento** — regra determinística por keyword (`cheap_route`) prioritária; LLM só decide quando não há sinal de regra nenhum. Fan-out paralelo (`order_agent` + `billing_agent`) para perguntas compostas genuinamente independentes.
 5. **Cascata de cache semântico** — `$vectorSearch` em `short_term_memory` unido (`$unionWith`) com `semantic_cache`; HIT retorna sem chamar LLM nenhum.
 6. **Loop de agentes (handoff)** — até `MAX_HOPS = 5` agentes em cadeia, cada um podendo pedir handoff explícito para outro. Cada runner lê o Mongo com filtro de ownership reconstruído, e opcionalmente sintetiza a resposta final via LLM sobre o documento já buscado (nunca o LLM decide o que buscar).

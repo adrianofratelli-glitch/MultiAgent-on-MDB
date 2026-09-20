@@ -134,13 +134,22 @@ async def cascade_long_term_context(store: DataStore, *, customer_key: str, mess
         )
 
 
-async def cascade_store_episode(store: DataStore, *, customer_key: str, message: str, answer: str) -> None:
-    """Grava um episódio na memória de longo prazo (cross-sessão, por customer_key) — o lado da
-    cascata que faltava: cascade_long_term_context() já LÊ daqui, mas nada ESCREVIA. Sem isso a
-    collection ficava sempre vazia e o painel de governança mentia sobre a 3ª camada da cascata."""
-    await store.insert_one(
+async def cascade_store_episode(store: DataStore, *, customer_key: str, intent: str | None, agent: str) -> None:
+    """Registra na memória de longo prazo QUE o cliente tratou de um assunto — não o que foi dito.
+
+    O texto do episódio é montado só com rótulos do próprio sistema (intent, agente). Antes gravava
+    "Pergunta/Resposta" crua, e essa memória volta ao prompt (`long_term_hint`): qualquer frase que o
+    cliente digitasse, injeção incluída, virava contexto persistente de turnos futuros. Um episódio por
+    (cliente, intent, agente), atualizado — a coleção não cresce a cada repetição.
+    """
+    label = intent or "geral"
+    now = utcnow()
+    await store.replace_one(
         "long_term_memory",
-        {"customer_key": customer_key, "text": f"Pergunta: {message}\nResposta: {answer}", "created_at": utcnow()},
+        {"customer_key": customer_key, "kind": "episode", "intent": label, "agent": agent},
+        {"customer_key": customer_key, "kind": "episode", "intent": label, "agent": agent,
+         "text": f"Cliente já foi atendido sobre '{label}' pelo agente {agent}.", "created_at": now},
+        upsert=True,
     )
 
 
