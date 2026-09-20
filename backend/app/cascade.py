@@ -4,7 +4,9 @@ from typing import Literal
 
 from .budget import estimate_tokens
 from .config import get_settings
+from . import turn_classifier
 from .database import DataStore, utcnow
+from .memory import should_extract
 from .router import normalize
 
 # Only catalog/KB content can be cached. The orchestrator must also pass
@@ -23,9 +25,31 @@ class CascadeResult:
     active_agent: str | None = None
     timeline: list[dict] = field(default_factory=list)
     tokens_economizados: int = 0
+    # Por que um HIT (ou a leitura) foi descartado: turno pessoal nunca vem do cache.
+    personal_reason: Literal["frase", "classificador"] | None = None
+    classifier: dict | None = None
 
 
 async def cascade_lookup(store: DataStore, *, target: str, area: str, customer_key: str, session_id: str, message: str) -> CascadeResult:
+    """Cascata com bypass de turno pessoal: uma resposta que depende da memória do cliente não vem do cache.
+
+    1) portão de frases (grátis): turno pessoal nem consulta o cache; 2) num HIT, o classificador
+    vetorial ainda pode descartá-lo (paráfrase que o portão não conhece). Falha fechado: se o
+    classificador não consegue decidir, o HIT é descartado. Num MISS o classificador nunca roda.
+    """
+    if should_extract(message):
+        return CascadeResult(hit=False, personal_reason="frase")
+    result = await _cascade_lookup_raw(store, target=target, area=area, customer_key=customer_key, session_id=session_id, message=message)
+    if not result.hit:
+        return result
+    verdict = await turn_classifier.classify(store, message)
+    if verdict["personal"]:
+        return CascadeResult(hit=False, personal_reason="classificador", classifier=verdict)
+    result.classifier = verdict
+    return result
+
+
+async def _cascade_lookup_raw(store: DataStore, *, target: str, area: str, customer_key: str, session_id: str, message: str) -> CascadeResult:
     """UMA consulta decide HIT/MISS antes do LLM: $vectorSearch em curto_prazo (filtrado por sessão, threshold
     permissivo — pega reformulação) $unionWith $vectorSearch em cache (sem filtro de sessão, threshold rígido —
     pergunta comum já respondida), cada ramo já filtrado pelo próprio threshold ANTES do union, senão um score
@@ -191,8 +215,11 @@ async def cascade_store_turn(
     timeline: list[dict],
     active_agent: str,
     cache_eligible: bool = False,
-) -> None:
+) -> Literal["frase", "classificador"] | None:
     """Grava sempre em curto_prazo e só promove respostas estáveis ao cache semântico.
+
+    Devolve por que a promoção foi negada por ser turno pessoal ("frase" | "classificador"), ou None.
+    O classificador vetorial só roda aqui quando a promoção aconteceria de fato.
 
     ``cache_eligible`` é opt-in: o caller precisa provar que o turno não dependeu de estado
     mutável do cliente, memória, handoff ou escrita. Mesmo quando elegível, o escopo global
@@ -207,7 +234,11 @@ async def cascade_store_turn(
         upsert=True,
     )
     if not cache_eligible or intent not in GLOBAL_CACHE_INTENTS:
-        return
+        return None
+    if should_extract(message):
+        return "frase"
+    if (await turn_classifier.classify(store, message))["personal"]:
+        return "classificador"
     await store.replace_one(
         "semantic_cache",
         {"agent": target, "customer_key": customer_key, "scope": "customer", "question_norm": question_norm},
@@ -220,3 +251,4 @@ async def cascade_store_turn(
         {"agent": target, "area": area, "scope": "global", "cache_policy": CACHE_POLICY, "question_text": message, "question_norm": question_norm, "answer": answer, "active_agent": active_agent, "timeline": timeline, "created_at": now, "expires_at": now + timedelta(hours=24)},
         upsert=True,
     )
+    return None

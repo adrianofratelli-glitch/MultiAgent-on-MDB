@@ -232,7 +232,7 @@ class OrchestrationService:
             await metrics.increment(f"agent.{target}.cache_hits")
             await metrics.increment(f"cache.hits.{cascade.fonte}")
             await metrics.increment("tokens.economizados", cascade.tokens_economizados)
-            timeline.append(TimelineEvent(category="cache", title=f"Cascata semântica: HIT ({cascade.fonte})", agent=target, collection="short_term_memory" if cascade.fonte == "curto_prazo" else "semantic_cache", op="vectorSearch", filter={"session_id": conversation_id, "agent": target}, result={"hit": True, "fonte": cascade.fonte, "score": cascade.score}))
+            timeline.append(TimelineEvent(category="cache", title=f"Cascata semântica: HIT ({cascade.fonte})", agent=target, collection="short_term_memory" if cascade.fonte == "curto_prazo" else "semantic_cache", op="vectorSearch", filter={"session_id": conversation_id, "agent": target}, result={"hit": True, "fonte": cascade.fonte, "score": cascade.score, "classifier_score": (cascade.classifier or {}).get("score")}))
             response = cascade.answer or ""
             cached_active_agent = cascade.active_agent or target
             cached_timeline = timeline + [TimelineEvent(**{**event, "replayed": True}) for event in cascade.timeline]
@@ -247,7 +247,7 @@ class OrchestrationService:
             trace_url = await self._persist_trace(conversation_id, customer, masked, response, cached_timeline, cached_active_agent, self._usage(budget), (perf_counter() - started) * 1000, llm_calls=budget.llm_calls)
             await _record_collection_metrics(cached_timeline)
             return self._response(budget, conversation_id=conversation_id, response=response, active_agent=cached_active_agent, route_source=route_source, cache_hit=True, cache_source=cascade.fonte, tokens_economizados=cascade.tokens_economizados, timeline=cached_timeline, usage=self._usage(budget), suggestions=await _next_steps(self.store, customer, covered={TOPIC_BY_AGENT.get(cached_active_agent, "")}), langfuse_trace_url=trace_url)
-        timeline.append(TimelineEvent(category="cache", title="Cascata semântica: MISS (curto prazo + cache global)", agent=target, collection="short_term_memory", op="vectorSearch", filter={"session_id": conversation_id, "agent": target}, result={"hit": False}))
+        timeline.append(TimelineEvent(category="cache", title="Cascata semântica: MISS (curto prazo + cache global)", agent=target, collection="short_term_memory", op="vectorSearch", filter={"session_id": conversation_id, "agent": target}, result={"hit": False, **({"personal": cascade.personal_reason, "classifier": cascade.classifier} if cascade.personal_reason else {})}))
         long_term = await cascade_long_term_context(self.store, customer_key=customer["customer_key"], message=masked)
         if long_term:
             timeline.append(TimelineEvent(category="memory", title="Memória de longo prazo recuperada (contexto pro prompt)", agent=target, collection="long_term_memory", op="vectorSearch", filter={"customer_key": customer["customer_key"]}, result={"count": len(long_term)}))
@@ -376,7 +376,7 @@ class OrchestrationService:
         cascade = await cascade_lookup(self.store, target=fanout_key, area=customer["area"], customer_key=customer["customer_key"], session_id=conversation_id, message=masked)
         if cascade.hit:
             await metrics.increment(f"cache.hits.{cascade.fonte}")
-            timeline.append(TimelineEvent(category="cache", title=f"Cascata semântica: HIT ({cascade.fonte})", collection="short_term_memory" if cascade.fonte == "curto_prazo" else "semantic_cache", op="vectorSearch", filter={"session_id": conversation_id, "agent": fanout_key}, result={"hit": True, "fonte": cascade.fonte, "score": cascade.score}))
+            timeline.append(TimelineEvent(category="cache", title=f"Cascata semântica: HIT ({cascade.fonte})", collection="short_term_memory" if cascade.fonte == "curto_prazo" else "semantic_cache", op="vectorSearch", filter={"session_id": conversation_id, "agent": fanout_key}, result={"hit": True, "fonte": cascade.fonte, "score": cascade.score, "classifier_score": (cascade.classifier or {}).get("score")}))
             response = cascade.answer or ""
             cached_active_agent = cascade.active_agent or fanout_key
             cached_timeline = timeline + [TimelineEvent(**{**event, "replayed": True}) for event in cascade.timeline]
@@ -384,7 +384,7 @@ class OrchestrationService:
             trace_url = await self._persist_trace(conversation_id, customer, masked, response, cached_timeline, cached_active_agent, self._usage(budget), (perf_counter() - started) * 1000, llm_calls=budget.llm_calls)
             await _record_collection_metrics(cached_timeline)
             return self._response(budget, conversation_id=conversation_id, response=response, active_agent=cached_active_agent, route_source="fanout", cache_hit=True, cache_source=cascade.fonte, tokens_economizados=cascade.tokens_economizados, timeline=cached_timeline, usage=self._usage(budget), suggestions=await _next_steps(self.store, customer, covered={"order", "invoice"}), langfuse_trace_url=trace_url)
-        timeline.append(TimelineEvent(category="cache", title="Cascata semântica: MISS (curto prazo + cache global)", collection="short_term_memory", op="vectorSearch", filter={"session_id": conversation_id, "agent": fanout_key}, result={"hit": False}))
+        timeline.append(TimelineEvent(category="cache", title="Cascata semântica: MISS (curto prazo + cache global)", collection="short_term_memory", op="vectorSearch", filter={"session_id": conversation_id, "agent": fanout_key}, result={"hit": False, **({"personal": cascade.personal_reason, "classifier": cascade.classifier} if cascade.personal_reason else {})}))
         tail_start = len(timeline)
         timeline.append(TimelineEvent(category="fanout", title="Despacho paralelo", collection="multiagent_brain.routing_rules", op="read", filter={"targets": targets}, result={"agents": targets}))
         for target in targets:
