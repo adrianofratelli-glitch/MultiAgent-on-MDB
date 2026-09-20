@@ -144,25 +144,28 @@ async def _cascade_lookup_fallback(store: DataStore, *, target: str, area: str, 
 
 
 async def cascade_long_term_context(store: DataStore, *, customer_key: str, message: str) -> list[dict]:
-    """MISS nos dois: puxa contexto de longo prazo (memória semântica/episódica do cliente) pro prompt —
-    isso NÃO é resposta pronta, é input do LLM, por isso não conta como cache hit."""
+    """MISS nos dois: puxa contexto de longo prazo (memória episódica do cliente) pro prompt —
+    isso NÃO é resposta pronta, é input do LLM, por isso não conta como cache hit.
+
+    Só entra no prompt o que o sistema escreveu (`kind == "episode"`: rótulos de intent/agente). Documentos
+    legados com Pergunta/Resposta crua ficam de fora: eram texto digitado pelo cliente voltando ao prompt.
+    Como o episódio é só rótulo, ele não torna a resposta dependente do cliente (não bloqueia o cache)."""
     settings = get_settings()
+    limit = settings.long_term_memory_limit
     if store.memory:
-        return await store.find_many("long_term_memory", {"customer_key": customer_key}, limit=settings.long_term_memory_limit)
-    pipeline = [
-        {"$vectorSearch": {"index": "long_term_autoembed_v1", "path": "text", "query": {"text": message}, "model": "voyage-4", "filter": {"customer_key": customer_key}, "numCandidates": 50, "limit": settings.long_term_memory_limit}},
-        {"$addFields": {"score": {"$meta": "vectorSearchScore"}}},
-    ]
-    try:
-        return await store.aggregate("long_term_memory", pipeline)
-    except Exception:
-        # Memória de longo prazo enriquece o prompt, mas não pode derrubar o turno se o índice estiver
-        # construindo ou indisponível. A consulta comum continua isolada por customer_key.
-        return await store.find_many(
-            "long_term_memory",
-            {"customer_key": customer_key},
-            limit=settings.long_term_memory_limit,
-        )
+        docs = await store.find_many("long_term_memory", {"customer_key": customer_key}, limit=limit * 4)
+    else:
+        pipeline = [
+            {"$vectorSearch": {"index": "long_term_autoembed_v1", "path": "text", "query": {"text": message}, "model": "voyage-4", "filter": {"customer_key": customer_key}, "numCandidates": 50, "limit": limit * 4}},
+            {"$addFields": {"score": {"$meta": "vectorSearchScore"}}},
+        ]
+        try:
+            docs = await store.aggregate("long_term_memory", pipeline)
+        except Exception:
+            # Memória de longo prazo enriquece o prompt, mas não pode derrubar o turno se o índice estiver
+            # construindo ou indisponível. A consulta comum continua isolada por customer_key.
+            docs = await store.find_many("long_term_memory", {"customer_key": customer_key}, limit=limit * 4)
+    return [doc for doc in docs if doc.get("kind") == "episode"][:limit]
 
 
 async def cascade_store_episode(store: DataStore, *, customer_key: str, intent: str | None, agent: str) -> None:

@@ -18,18 +18,33 @@ def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def as_aware(value: datetime) -> datetime:
+    """Documento antigo/legado pode trazer datetime naive; trata como UTC (é assim que o Mongo grava)."""
+    return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+
+_COMPARISONS = {"$gt": lambda a, b: a > b, "$gte": lambda a, b: a >= b,
+                "$lt": lambda a, b: a < b, "$lte": lambda a, b: a <= b}
+
+
+def _compare(operator: str, actual, value) -> bool:
+    """Como o Mongo: campo ausente/de outro tipo não casa em comparação (em vez de estourar TypeError)."""
+    if actual is None:
+        return False
+    try:
+        return _COMPARISONS[operator](actual, value)
+    except TypeError:
+        return False
+
+
 def _matches(document: dict, query: dict) -> bool:
     for key, expected in query.items():
         actual = document.get(key)
         if isinstance(expected, dict):
             for operator, value in expected.items():
-                if operator == "$gt" and not actual > value:
+                if operator in _COMPARISONS and not _compare(operator, actual, value):
                     return False
-                if operator == "$gte" and not actual >= value:
-                    return False
-                if operator == "$lt" and not actual < value:
-                    return False
-                if operator == "$lte" and not actual <= value:
+                if operator == "$exists" and (key in document) != bool(value):
                     return False
                 if operator == "$in" and actual not in value:
                     return False
@@ -139,6 +154,9 @@ class DataStore:
             serverSelectionTimeoutMS=5000,
             connectTimeoutMS=5000,
             appname=self.settings.app_name,
+            # datetimes lidos voltam AWARE (UTC), como utcnow(): sem isso o PyMongo devolve naive e qualquer
+            # comparação com utcnow() estoura TypeError — só em modo live, nunca em DEMO_MODE.
+            tz_aware=True,
         )
         hello = await self.client.admin.command("hello")
         # setName = replica set; "isdbgrid" = mongos à frente de um cluster shardeado.

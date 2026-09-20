@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from time import perf_counter
 from typing import Any
 
-from .database import DataStore, run_in_transaction_with_retry, utcnow
+from .database import DataStore, as_aware, run_in_transaction_with_retry, utcnow
 from .guidance import customer_snapshot, format_options, no_data_reply
 from .memory import active_budget
 from .models import TimelineEvent
@@ -422,13 +422,13 @@ async def run_loyalty_agent(store: DataStore, message: str, customer: dict, llm=
             {"customer_key": customer["customer_key"], "reward": label, "status": "confirmado"},
             limit=5, sort=[("at", -1)],
         )
-        duplicate = next((item for item in recent_redemptions if item.get("at") and item["at"] >= recent_cutoff), None)
+        duplicate = next((item for item in recent_redemptions if item.get("at") and as_aware(item["at"]) >= recent_cutoff), None)
         if duplicate:
             response = (
                 f"Resgate confirmado: **{label}**, {duplicate['points_spent']} pontos debitados "
                 f"(pedido de resgate idêntico já processado há poucos segundos — não debitei de novo)."
             )
-            event = TimelineEvent(category="agent", title="Resgate de fidelidade (idempotência: repetição recente ignorada)", agent="loyalty_agent", collection="redemptions", op="read", filter=query, result=duplicate, duration_ms=(perf_counter() - started) * 1000)
+            event = TimelineEvent(category="agent", title="Resgate de fidelidade (idempotência: repetição recente ignorada)", agent="loyalty_agent", collection="redemptions", op="read", filter=query, result=public_document(duplicate), duration_ms=(perf_counter() - started) * 1000)
             return AgentResult(response, event)
         if clean["points"] < cost:
             faltam = cost - clean["points"]

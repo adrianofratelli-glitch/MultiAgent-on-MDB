@@ -338,9 +338,10 @@ class OrchestrationService:
         turn_tail = timeline[tail_start:]
         cache_eligible = (
             decision.intent in GLOBAL_CACHE_INTENTS
-            and not memory
             and not written_facts
-            and not long_term
+            # a resposta só depende do cliente se o turno USOU memória (ex.: orçamento no product_agent, que emite
+            # um evento de memória); ter fatos gravados ou episódios (rótulos) não a torna pessoal.
+            and all(event.category != "memory" for event in turn_tail)
             and not handoff_chain
             and current == target
             and all(event.op != "write" for event in turn_tail)

@@ -1,6 +1,6 @@
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_serializer, field_validator
 
 
 class TokenRequest(BaseModel):
@@ -34,6 +34,18 @@ class OrderStatusUpdate(BaseModel):
         return value
 
 
+def _jsonable(value: Any) -> Any:
+    """Tipos do driver (ObjectId, Decimal128, bytes) viram texto: documentos reais do Atlas chegam à timeline
+    crus em alguns caminhos, e o DEMO_MODE nunca produz esses tipos."""
+    if isinstance(value, dict):
+        return {key: _jsonable(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(item) for item in value]
+    if type(value).__module__.startswith("bson") or isinstance(value, bytes):
+        return str(value)
+    return value
+
+
 class TimelineEvent(BaseModel):
     category: Literal["agent", "memory", "guardrail", "cache", "handoff", "fanout"]
     title: str
@@ -45,6 +57,10 @@ class TimelineEvent(BaseModel):
     reason: str | None = None
     duration_ms: float = 0
     replayed: bool = False
+
+    @field_serializer("filter", "result")
+    def _serialize_driver_types(self, value: Any) -> Any:
+        return _jsonable(value)
 
 
 class Suggestion(BaseModel):

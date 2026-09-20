@@ -158,10 +158,18 @@ async def extract_and_store(store: DataStore, customer_key: str, message: str, *
         return []
 
     now = utcnow()
-    writes: list[tuple[dict, dict | None]] = []  # (novo documento, documento antigo a desativar)
-    already_replaced: set[str] = set()
+    candidates = _parse_candidates(raw)[:MAX_EXTRACTED_FACTS]
+    # Só pode haver UM teto ativo (dois orçamentos disputariam o filtro do catálogo): num turno com vários,
+    # vale o último; e um teto novo desativa TODOS os ativos, não só o que o LLM apontou em `replaces`.
+    last_budget = max((i for i, c in enumerate(candidates) if _clean_budget(c.get("max_price_brl"))), default=None)
+    known_budgets = await store.find_many("customer_memory", {"customer_key": customer_key, "active": True, "max_price_brl": {"$gt": 0}}, limit=MAX_ACTIVE_FACTS)
+    new_docs: list[tuple[dict, list[str]]] = []  # (novo documento, ids que ele desativa)
+    retired: set[str] = set()
     seen_norms = {doc.get("fact_norm") or _fact_norm(_text(doc)) for doc in known}
-    for candidate in _parse_candidates(raw)[:MAX_EXTRACTED_FACTS]:
+    for index, candidate in enumerate(candidates):
+        price = _clean_budget(candidate.get("max_price_brl"))
+        if price and index != last_budget:
+            continue
         text = candidate["fact"].strip()[:MAX_FACT_CHARS]
         norm = _fact_norm(text)
         if not text or norm in seen_norms:
@@ -170,13 +178,12 @@ async def extract_and_store(store: DataStore, customer_key: str, message: str, *
             logger.warning("fato em formato de instrução descartado (customer_key=%s)", customer_key)
             continue
         replaces = candidate.get("replaces")
-        replaced = known[replaces - 1] if isinstance(replaces, int) and not isinstance(replaces, bool) and 0 < replaces <= len(known) else None
-        price = _clean_budget(candidate.get("max_price_brl"))
-        if price and replaced is None:
-            # Só pode haver UM teto ativo: dois orçamentos disputariam o filtro do catálogo.
-            replaced = next((doc for doc in known if _clean_budget(doc.get("max_price_brl"))), None)
-        if replaced is not None and replaced["_id"] in already_replaced:
-            replaced = None  # um fato só é substituído uma vez por turno; o resto entra como novo
+        targets = [known[replaces - 1]] if isinstance(replaces, int) and not isinstance(replaces, bool) and 0 < replaces <= len(known) else []
+        if price:
+            targets += known_budgets
+        # um fato só é desativado uma vez por turno; o que já foi desativado por outro candidato é ignorado
+        ids = list(dict.fromkeys(t["_id"] for t in targets if t["_id"] not in retired))
+        retired.update(ids)
         category = candidate.get("category") if candidate.get("category") in CATEGORIES else "contexto"
         doc = {"_id": f"mem-{uuid.uuid4().hex[:16]}", "customer_key": customer_key, "fact": text,
                "fact_norm": norm, "category": category, "active": True,
@@ -184,25 +191,23 @@ async def extract_and_store(store: DataStore, customer_key: str, message: str, *
         if price:
             doc["max_price_brl"] = price
         seen_norms.add(norm)
-        if replaced is not None:
-            already_replaced.add(replaced["_id"])
-        writes.append((doc, replaced))
+        new_docs.append((doc, ids))
 
     room = MAX_ACTIVE_FACTS - await store.count("customer_memory", {"customer_key": customer_key, "active": True})
     bounded = []
-    for doc, replaced in writes:
-        if replaced is not None or room > 0:
-            bounded.append((doc, replaced))
-            room -= 0 if replaced is not None else 1
+    for doc, ids in new_docs:
+        if ids or room > 0:
+            bounded.append((doc, ids))
+            room -= 0 if ids else 1
     if not bounded:
         return []
 
     try:
         async with store.transaction() as tx:
-            for doc, replaced in bounded:
+            for doc, ids in bounded:
                 await store.insert_one("customer_memory", doc, session=tx)
-                if replaced is not None:
-                    await store.update_one("customer_memory", {"_id": replaced["_id"]},
+                for old_id in ids:
+                    await store.update_one("customer_memory", {"_id": old_id},
                                            {"$set": {"active": False, "superseded_by": doc["_id"], "updated_at": now}},
                                            session=tx)
     except Exception:  # noqa: BLE001 — memória nunca derruba o turno; a transação já desfez o que gravou

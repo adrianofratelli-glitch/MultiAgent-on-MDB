@@ -154,5 +154,7 @@ async def decision_trail(store: DataStore, customer_key: str, *, subject_id: str
         query["subject_id"] = subject_id
     decisions = await store.find_many(DECISIONS_COLLECTION, query, limit=limit, sort=[("at", -1)])
     events = await store.find_many(AUDIT_COLLECTION, query, limit=limit * 2, sort=[("at", -1)])
-    strip = lambda items: [{k: v for k, v in item.items() if k != "_id"} for item in items]
+    def strip(items):
+        return [{k: v for k, v in item.items() if k != "_id"} for item in items]
+
     return {"decisions": strip(decisions), "audit_events": strip(events)}

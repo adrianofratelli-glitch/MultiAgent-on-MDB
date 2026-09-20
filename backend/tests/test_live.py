@@ -122,3 +122,13 @@ async def test_live_full_turn_survives_hostile_input(live):
         out = await service.run_turn(message, customer, None)
         assert out.response
         assert "PED-1001" not in out.response  # pedido da Ana não pode vazar
+
+
+async def test_live_classifier_separates_personal_from_generic_when_calibrated(live):
+    store, _, _, _ = live
+    if await store.find_one(turn_classifier.CONFIG_COLLECTION, {"active": True}, brain=True) is None:
+        pytest.skip("classificador ainda não calibrado (seed_turn_probes.py + calibrate_thresholds.py --only turn)")
+    personal = await turn_classifier.classify(store, "com qual nome você costuma se dirigir a mim?")
+    generic = await turn_classifier.classify(store, "qual o prazo de troca de um produto?")
+    assert personal["personal"] and not personal["error"]
+    assert not generic["personal"] and not generic["error"]

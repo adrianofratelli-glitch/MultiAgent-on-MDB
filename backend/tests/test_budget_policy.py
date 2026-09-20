@@ -1,7 +1,5 @@
 """Orçamento do cliente é campo estruturado: o SERVIDOR injeta o teto como pré-filtro do catálogo."""
 
-import pytest
-
 from app.agents import build_product_pipeline, run_product_agent, search_products
 from app.config import Settings
 from app.database import DataStore, utcnow

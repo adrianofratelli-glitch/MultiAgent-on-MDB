@@ -46,6 +46,8 @@ python backend/eval.py http://127.0.0.1:8031               # golden-dataset eval
 cd backend && python calibrate_thresholds.py               # measures the denylist score band against labeled probes (--apply writes vector_threshold to guardrail_policies)
 cd backend && python calibrate_thresholds.py --only turn --apply   # one target only; --allow-errors (turn only) writes the lowest-error threshold and lists the probes that miss
 cd backend && python seed_turn_probes.py                   # explicit step: creates turn_probes + its vector index in the brain DB; deliberately NOT part of seed.py
+cd backend && python migrate_legacy_memory.py [--apply]   # one-off, additive/idempotent: legacy customer_memory (fact_type/value) -> fact/max_price_brl; dry-run by default
+cd backend && LIVE=1 pytest tests/test_live.py -q        # LIVE mode: real Atlas + real LLM (costs tokens; disposable customer_key, cleans up, Langfuse off). Run before shipping — DEMO_MODE hides real-driver bugs (naive datetimes, raw ObjectId, legacy docs)
 ```
 
 Before a live demo, pre-warm the semantic cache so the customer's first click isn't a cold multi-hop LLM chain:
