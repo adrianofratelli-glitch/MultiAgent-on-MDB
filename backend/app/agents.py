@@ -591,27 +591,33 @@ def parse_price_ceiling(message: str) -> float | None:
     return None
 
 
+def build_product_pipeline(message: str, max_price: float | None = None, category: str | None = None) -> list[dict]:
+    """Busca de catálogo no Atlas. O teto de preço entra no `filter` do $vectorSearch (pré-filtro nativo:
+    o ANN só percorre vetores que passam nele), montado em Python — nem o modelo nem o texto do prompt
+    conseguem ignorá-lo. Todo campo usado aqui precisa ser `filter` em PRODUCTS_VECTOR_INDEX_DEFINITION."""
+    vector_filter: dict[str, Any] = {"active": True}
+    if max_price is not None:
+        vector_filter["price"] = {"$lte": max_price}
+    if category:
+        vector_filter["category"] = category
+    return [
+        {"$vectorSearch": {"index": "products_autoembed_v1", "path": "search_text", "query": {"text": message}, "model": "voyage-4", "filter": vector_filter, "numCandidates": 50, "limit": 8}},
+        {"$addFields": {"relevance": {"$meta": "vectorSearchScore"}}},
+        {"$addFields": {"weighted_score": {"$add": [
+            {"$multiply": [0.55, "$relevance"]},
+            {"$multiply": [0.30, {"$divide": ["$rating", 5.0]}]},
+            {"$multiply": [0.15, {"$divide": [{"$min": ["$stock", 20]}, 20.0]}]},
+        ]}}},
+        {"$sort": {"weighted_score": -1}},
+        {"$limit": 4},
+        {"$project": {"_id": 0, "sku": 1, "name": 1, "category": 1, "price": 1, "rating": 1, "stock": 1, "relevance": 1, "weighted_score": 1}},
+    ]
+
+
 async def search_products(store: DataStore, message: str, max_price: float | None = None, category: str | None = None) -> list[dict]:
     if not store.memory:
-        vector_filter: dict[str, Any] = {"active": True}
-        if max_price is not None:
-            vector_filter["price"] = {"$lt": max_price}
-        if category:
-            vector_filter["category"] = category
-        pipeline = [
-            {"$vectorSearch": {"index": "products_autoembed_v1", "path": "search_text", "query": {"text": message}, "model": "voyage-4", "filter": vector_filter, "numCandidates": 50, "limit": 8}},
-            {"$addFields": {"relevance": {"$meta": "vectorSearchScore"}}},
-            {"$addFields": {"weighted_score": {"$add": [
-                {"$multiply": [0.55, "$relevance"]},
-                {"$multiply": [0.30, {"$divide": ["$rating", 5.0]}]},
-                {"$multiply": [0.15, {"$divide": [{"$min": ["$stock", 20]}, 20.0]}]},
-            ]}}},
-            {"$sort": {"weighted_score": -1}},
-            {"$limit": 4},
-            {"$project": {"_id": 0, "sku": 1, "name": 1, "category": 1, "price": 1, "rating": 1, "stock": 1, "relevance": 1, "weighted_score": 1}},
-        ]
         try:
-            cursor = await store._collection("products_catalog").aggregate(pipeline)
+            cursor = await store._collection("products_catalog").aggregate(build_product_pipeline(message, max_price, category))
             return await cursor.to_list(None)
         except Exception:
             pass
@@ -619,7 +625,7 @@ async def search_products(store: DataStore, message: str, max_price: float | Non
     if category:
         products = [item for item in products if item["category"] == category]
     if max_price is not None:
-        products = [item for item in products if item["price"] < max_price]
+        products = [item for item in products if item["price"] <= max_price]
     return [public_document(item) for item in _local_rank(products, message, ("name", "category", "search_text"))[:4]]
 
 
@@ -631,13 +637,17 @@ async def run_product_agent(store: DataStore, message: str, customer: dict, llm=
     memory_bias = budget_brl is not None and explicit_price is None
     max_price = explicit_price if explicit_price is not None else (budget_brl if memory_bias else (350.0 if "mais barato" in normalize(message) else None))
     products = await search_products(store, message, max_price, category)
-    if not products and category:
-        # teto de preço pode ter zerado a categoria certa; melhor mostrar algo da categoria do que nada.
+    if not products and category and not memory_bias:
+        # teto de preço PEDIDO NA MENSAGEM pode ter zerado a categoria certa; melhor mostrar algo da categoria
+        # do que nada. O orçamento da memória do cliente é limite duro: nunca é relaxado em silêncio.
         products = await search_products(store, message, None, category)
     if not products and not category:
         # pergunta totalmente fora do script (ex. "o que vocês têm de bom pra presentear alguém"): dá pro
         # modelo o catálogo inteiro ativo pra ele raciocinar, em vez de simplesmente desistir.
-        products = [public_document(item) for item in _local_rank(await store.find_many("products_catalog", {"active": True}, limit=100), message, ("name", "category", "search_text"))[:6]]
+        catalog = await store.find_many("products_catalog", {"active": True}, limit=100)
+        if memory_bias:
+            catalog = [item for item in catalog if item["price"] <= max_price]
+        products = [public_document(item) for item in _local_rank(catalog, message, ("name", "category", "search_text"))[:6]]
     if products:
         lines = [f"- **{item['name']}** — R$ {item['price']:.2f} · ★{item.get('rating', '—')} · {item.get('stock', 0)} em estoque" for item in products[:3]]
         response = "Encontrei estas opções no catálogo:\n" + "\n".join(lines)
@@ -673,7 +683,7 @@ async def run_product_agent(store: DataStore, message: str, customer: dict, llm=
     if category:
         search_filter["category"] = category
     if max_price is not None:
-        search_filter["price"] = {"$lt": max_price}
+        search_filter["price"] = {"$lte": max_price}
     event = TimelineEvent(category="agent", title="Recomendação com ranking ponderado (relevância + nota + estoque)" + (" + modelo" if synthesized else ""), agent="product_agent", collection="products_catalog", op="vectorSearch", filter=search_filter, result=products[:3], duration_ms=(perf_counter() - started) * 1000)
     events = [event]
     if memory_bias:

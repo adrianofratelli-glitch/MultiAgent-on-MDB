@@ -104,6 +104,19 @@ async def seed(store: DataStore, *, create_indexes: bool = True) -> list[str]:
     return messages
 
 
+# `price` é campo `filter`: é o que permite ao servidor injetar o teto de orçamento do cliente como
+# pré-filtro NATIVO do $vectorSearch (agents.py:build_product_pipeline). Há um teste que impede o
+# pipeline de filtrar por um campo que o índice não declara.
+PRODUCTS_VECTOR_INDEX_DEFINITION = {
+    "fields": [
+        {"type": "autoEmbed", "modality": "text", "path": "search_text", "model": "voyage-4", "numDimensions": 1024, "similarity": "cosine", "indexingMethod": "flat"},
+        {"type": "filter", "path": "category"},
+        {"type": "filter", "path": "active"},
+        {"type": "filter", "path": "price"},
+    ]
+}
+
+
 async def create_search_indexes(store: DataStore) -> list[str]:
     if store.memory:
         return ["índices Search/Vector: ignorados em DEMO_MODE"]
@@ -113,14 +126,7 @@ async def create_search_indexes(store: DataStore) -> list[str]:
             SearchIndexModel(
                 name="products_autoembed_v1",
                 type="vectorSearch",
-                definition={
-                    "fields": [
-                        {"type": "autoEmbed", "modality": "text", "path": "search_text", "model": "voyage-4", "numDimensions": 1024, "similarity": "cosine", "indexingMethod": "flat"},
-                        {"type": "filter", "path": "category"},
-                        {"type": "filter", "path": "active"},
-                        {"type": "filter", "path": "price"},
-                    ]
-                },
+                definition=PRODUCTS_VECTOR_INDEX_DEFINITION,
             ),
         ),
         (
