@@ -37,6 +37,8 @@ export const api = {
     return data.customer;
   },
   health: () => request('/api/health'),
+  // Aquece o cache no servidor (segundo plano, com cooldown): a demo abre já quente, sem script manual.
+  warmup: () => request('/api/warmup', { method: 'POST' }).catch(() => null),
   agents: () => request('/api/agents'),
   demoScenarios: () => request('/api/demo-scenarios'),
   metrics: () => request('/api/metrics'),

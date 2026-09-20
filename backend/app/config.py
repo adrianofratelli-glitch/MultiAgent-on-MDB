@@ -77,6 +77,9 @@ class Settings(BaseSettings):
     short_term_cache_threshold: float = 0.78
     global_cache_threshold: float = 0.80
     long_term_memory_limit: int = 5
+    # Warmup automático do cache semântico (ao subir e quando a UI abre); 0 desliga. Menor que o TTL do cache.
+    warmup_on_start: bool = True
+    warmup_cooldown_minutes: int = 45
     langfuse_public_key: str = ""
     langfuse_secret_key: str = ""
     langfuse_host: str = "https://cloud.langfuse.com"

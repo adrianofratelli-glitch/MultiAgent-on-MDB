@@ -284,7 +284,7 @@ export default function App() {
     } catch (err) { setCustomer(null); setError(err.message); }
     finally { operationRef.current = false; setBusy(false); }
   };
-  useEffect(() => { switchIdentity('ana', { resume: false }); }, []);
+  useEffect(() => { api.warmup(); switchIdentity('ana', { resume: false }); }, []);
 
   useEffect(() => {
     if (nav === 'Métricas' && adminMode) {

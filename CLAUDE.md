@@ -50,11 +50,9 @@ cd backend && python migrate_legacy_memory.py [--apply]   # one-off, additive/id
 cd backend && LIVE=1 pytest tests/test_live.py -q        # LIVE mode: real Atlas + real LLM (costs tokens; disposable customer_key, cleans up, Langfuse off). Run before shipping — DEMO_MODE hides real-driver bugs (naive datetimes, raw ObjectId, legacy docs)
 ```
 
-Before a live demo, pre-warm the semantic cache so the customer's first click isn't a cold multi-hop LLM chain:
-```bash
-python backend/warmup.py http://127.0.0.1:8031
-```
-This calls every non-guardrail demo prompt (mirrors `frontend/src/App.jsx:DEMOS_BY_IDENTITY` verbatim — cache key is the normalized message) once per identity, for real, against Anthropic. It's honest pre-warming, not fabricated usage: the first real turn already happened during warmup, so the live click is a genuine `cache_hit: true` replaying the full stored timeline. `semantic_cache` TTL is 60 minutes to survive the walk from warmup to the meeting.
+The semantic cache **warms itself**: the server triggers `app/warmup.py` on startup and the frontend triggers it again on open (`POST /api/warmup`, single-flight, `WARMUP_COOLDOWN_MINUTES`=45 < cache TTL, `WARMUP_ON_START=0` disables). It warms generic product/support questions once per area with a neutral `warmup-<area>` identity — NOT the personal demo scenarios (orders/invoices/points), which `stable_v1` correctly never caches. A customer with an active `max_price_brl` bypasses the cache on `product_agent` turns (the cached answer ignores their limit). `python backend/warmup.py` only forces/observes it.
+
+`git push` runs `.githooks/pre-push` (ruff + offline tests + LIVE tests; `SKIP_LIVE=1` to skip). Activate on a fresh clone: `git config core.hooksPath .githooks`.
 
 Backend lint (ruff configured in `pyproject.toml`, no wrapper script):
 ```bash

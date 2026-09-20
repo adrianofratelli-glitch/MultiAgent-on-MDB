@@ -21,6 +21,7 @@ from .reviews import list_reviews, override_rate, resolve_review
 from .llm import LLMGateway
 from .metrics import metrics
 from .models import AgentUpdate, ChatRequest, ChatResponse, ReviewResolution, TokenRequest
+from .warmup import WarmupService
 from .orchestration import OrchestrationService
 from .rate_limit import SlidingWindowLimiter
 from .security import current_customer, issue_token, request_identity_key, require_admin
@@ -69,9 +70,17 @@ async def lifespan(app: FastAPI):
         from seed import seed
 
         await seed(store, create_indexes=False)
-    app.state.orchestrator = OrchestrationService(store, LLMGateway(settings), settings.global_turn_token_budget)
+    llm = LLMGateway(settings)
+    app.state.orchestrator = OrchestrationService(store, llm, settings.global_turn_token_budget)
+    app.state.warmup = WarmupService(store, app.state.orchestrator, has_llm=bool(llm.client) and not settings.demo_mode,
+                                     cooldown_minutes=settings.warmup_cooldown_minutes)
+    if settings.warmup_on_start:
+        app.state.warmup.trigger()  # a demo já nasce aquecida; a UI dispara de novo quando abre (respeita o cooldown)
     log("startup", storage="memory" if store.memory else "mongodb_atlas")
     yield
+    with suppress(Exception):
+        if app.state.warmup._task:
+            app.state.warmup._task.cancel()
     await store.close()
 
 
@@ -141,6 +150,15 @@ async def chat(request: Request, payload: ChatRequest, customer: Annotated[dict,
         except TimeoutError as exc:
             await metrics.increment("turns.deadline_exceeded")
             raise HTTPException(status.HTTP_504_GATEWAY_TIMEOUT, "deadline global do turno excedido") from exc
+
+
+@app.post("/api/warmup")
+async def warmup(request: Request):
+    """Aquece o cache em segundo plano e responde na hora. Aberto de propósito (a UI chama ao abrir), e seguro:
+    execução única por vez e no máximo uma a cada `warmup_cooldown_minutes`, então cliques/abas repetidos custam zero."""
+    if not limiter.allow(request_identity_key(request, "warmup")):
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "limite de requisições excedido")
+    return request.app.state.warmup.trigger()
 
 
 @app.get("/api/agents")

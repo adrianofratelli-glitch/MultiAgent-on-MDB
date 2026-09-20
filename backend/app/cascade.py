@@ -27,7 +27,7 @@ class CascadeResult:
     tokens_economizados: int = 0
     # Por que um HIT (ou a leitura) foi descartado: turno pessoal nunca vem do cache.
     scope: Literal["sessao", "customer", "global"] = "global"  # sem informação = o mais restrito
-    personal_reason: Literal["frase", "classificador"] | None = None
+    personal_reason: Literal["frase", "classificador", "orcamento"] | None = None
     classifier: dict | None = None
 
 

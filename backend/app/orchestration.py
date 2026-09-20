@@ -5,13 +5,13 @@ from time import perf_counter
 from .agents import RUNNERS
 from .economics import summarize_calls
 from .budget import TurnBudget, estimate_tokens
-from .cascade import (GLOBAL_CACHE_INTENTS, cascade_long_term_context, cascade_lookup, cascade_store_episode,
+from .cascade import (GLOBAL_CACHE_INTENTS, CascadeResult, cascade_long_term_context, cascade_lookup, cascade_store_episode,
                       cascade_store_short_term, cascade_store_turn)
 from .database import DataStore, utcnow
 from .guardrails import check_input, check_output
 from .langfuse_client import build_turn_trace
 from .llm import LLMGateway
-from .memory import extract_and_store
+from .memory import active_budget, extract_and_store
 from .metrics import metrics
 from .models import ChatResponse, TimelineEvent
 from .router import RouteDecision, cheap_route, deterministic_orchestrator, detect_fanout, has_domain_signal
@@ -227,7 +227,11 @@ class OrchestrationService:
             route_source = "fallback"
         timeline.append(TimelineEvent(category="agent", title="Roteamento inicial", agent=target, collection="multiagent_brain.routing_rules" if decision.source == "rules" else "multiagent_brain.agent_registry", op="read", filter={"intent": decision.intent}, result={"target_agent": target, "source": route_source, "confidence": decision.confidence}))
 
-        cascade = await cascade_lookup(self.store, target=target, area=customer["area"], customer_key=customer["customer_key"], session_id=conversation_id, message=masked)
+        if target == "product_agent" and await active_budget(self.store, customer["customer_key"]) is not None:
+            # o cache guarda a recomendação SEM teto; quem tem orçamento ativo nunca a recebe (ignoraria o limite dele)
+            cascade = CascadeResult(hit=False, personal_reason="orcamento")
+        else:
+            cascade = await cascade_lookup(self.store, target=target, area=customer["area"], customer_key=customer["customer_key"], session_id=conversation_id, message=masked)
         if cascade.hit:
             await metrics.increment(f"agent.{target}.cache_hits")
             await metrics.increment(f"cache.hits.{cascade.fonte}")

@@ -53,3 +53,15 @@ async def test_only_structured_episodes_reach_the_prompt():
     await store.insert_one("long_term_memory", {"customer_key": "ana", "kind": "episode", "intent": "suporte", "agent": "support_agent", "text": "Cliente já foi atendido sobre 'suporte' pelo agente support_agent.", "created_at": utcnow()})
     texts = [d["text"] for d in await cascade_long_term_context(store, customer_key="ana", message="oi")]
     assert texts == ["Cliente já foi atendido sobre 'suporte' pelo agente support_agent."]
+
+
+async def test_customer_with_budget_never_receives_the_generic_cached_recommendation():
+    """O cache global guarda a resposta SEM orçamento; servi-la a quem tem teto ignoraria o limite dele."""
+    store, svc = await world()
+    message = "me recomenda um fone de ouvido"
+    await svc.run_turn(message, BRUNO, None)  # Bruno (sem orçamento) deixa a resposta genérica no cache global
+    assert (await svc.run_turn(message, {**BRUNO, "customer_key": "outro"}, None)).cache_hit  # sanidade: o cache existe
+    await store.insert_one("customer_memory", {"customer_key": "ana", "fact": "Cliente tem limite de R$ 300", "fact_norm": "z", "category": "preferencia", "active": True, "max_price_brl": 300.0, "created_at": utcnow()})
+    out = await svc.run_turn(message, ANA, None)
+    assert not out.cache_hit
+    assert "Fone Studio Pro" not in out.response  # R$ 799: acima do teto dela
