@@ -26,6 +26,7 @@ class CascadeResult:
     timeline: list[dict] = field(default_factory=list)
     tokens_economizados: int = 0
     # Por que um HIT (ou a leitura) foi descartado: turno pessoal nunca vem do cache.
+    scope: Literal["sessao", "customer", "global"] = "global"  # sem informação = o mais restrito
     personal_reason: Literal["frase", "classificador"] | None = None
     classifier: dict | None = None
 
@@ -34,8 +35,11 @@ async def cascade_lookup(store: DataStore, *, target: str, area: str, customer_k
     """Cascata com bypass de turno pessoal: uma resposta que depende da memória do cliente não vem do cache.
 
     1) portão de frases (grátis): turno pessoal nem consulta o cache; 2) num HIT, o classificador
-    vetorial ainda pode descartá-lo (paráfrase que o portão não conhece). Falha fechado: se o
-    classificador não consegue decidir, o HIT é descartado. Num MISS o classificador nunca roda.
+    vetorial ainda pode descartá-lo (paráfrase que o portão não conhece). Num MISS nunca roda.
+
+    Se o classificador NÃO consegue decidir (índice ausente, limiar não medido, erro), falha fechado só
+    onde há risco de vazamento: HIT de escopo global é descartado; HIT da própria sessão/cliente segue,
+    porque não sai do dono. Só um veredito "pessoal" decisivo descarta qualquer escopo.
     """
     if should_extract(message):
         return CascadeResult(hit=False, personal_reason="frase")
@@ -43,7 +47,7 @@ async def cascade_lookup(store: DataStore, *, target: str, area: str, customer_k
     if not result.hit:
         return result
     verdict = await turn_classifier.classify(store, message)
-    if verdict["personal"]:
+    if verdict["personal"] and (not verdict["error"] or result.scope == "global"):
         return CascadeResult(hit=False, personal_reason="classificador", classifier=verdict)
     result.classifier = verdict
     return result
@@ -117,6 +121,7 @@ async def _cascade_lookup_raw(store: DataStore, *, target: str, area: str, custo
         active_agent=best.get("active_agent", target),
         timeline=best.get("timeline", []),
         tokens_economizados=tokens,
+        scope="sessao" if best["fonte"] == "curto_prazo" else ("customer" if best.get("scope") == "customer" else "global"),
     )
 
 
@@ -127,8 +132,10 @@ async def _cascade_lookup_fallback(store: DataStore, *, target: str, area: str, 
     question_norm = normalize(message)
     short = await store.find_one("short_term_memory", {"session_id": session_id, "customer_key": customer_key, "agent": target, "question_norm": question_norm, "expires_at": {"$gt": utcnow()}})
     if short:
-        return CascadeResult(hit=True, fonte="curto_prazo", score=1.0, answer=short.get("answer"), active_agent=short.get("active_agent", target), timeline=short.get("timeline", []), tokens_economizados=estimate_tokens(short.get("answer", "")))
+        return CascadeResult(hit=True, fonte="curto_prazo", scope="sessao", score=1.0, answer=short.get("answer"), active_agent=short.get("active_agent", target), timeline=short.get("timeline", []), tokens_economizados=estimate_tokens(short.get("answer", "")))
     cached = await store.find_one("semantic_cache", {"agent": target, "customer_key": customer_key, "scope": "customer", "cache_policy": CACHE_POLICY, "question_norm": question_norm, "expires_at": {"$gt": utcnow()}})
+    if cached:
+        return CascadeResult(hit=True, fonte="cache", scope="customer", score=1.0, answer=cached.get("answer"), active_agent=cached.get("active_agent", target), timeline=cached.get("timeline", []), tokens_economizados=estimate_tokens(cached.get("answer", "")))
     if not cached:
         cached = await store.find_one("semantic_cache", {"agent": target, "area": area, "scope": "global", "cache_policy": CACHE_POLICY, "question_norm": question_norm, "expires_at": {"$gt": utcnow()}})
     if cached:
@@ -237,7 +244,8 @@ async def cascade_store_turn(
         return None
     if should_extract(message):
         return "frase"
-    if (await turn_classifier.classify(store, message))["personal"]:
+    verdict = await turn_classifier.classify(store, message)
+    if verdict["personal"] and not verdict["error"]:
         return "classificador"
     await store.replace_one(
         "semantic_cache",
@@ -245,6 +253,8 @@ async def cascade_store_turn(
         {"agent": target, "area": area, "customer_key": customer_key, "scope": "customer", "cache_policy": CACHE_POLICY, "question_text": message, "question_norm": question_norm, "answer": answer, "active_agent": active_agent, "timeline": timeline, "created_at": now, "expires_at": now + timedelta(hours=24)},
         upsert=True,
     )
+    if verdict["error"]:
+        return None  # sem veredito: o escopo do cliente já foi gravado; o global espera a calibração
     await store.replace_one(
         "semantic_cache",
         {"agent": target, "area": area, "scope": "global", "question_norm": question_norm},

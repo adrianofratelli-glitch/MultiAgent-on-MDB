@@ -53,6 +53,8 @@ _INSTRUCTION_MARKERS = (
     " assistente deve", " agente deve", " voce deve", " o sistema deve",
     " desconto sempre", " sempre desconto", " sempre ter desconto",
     " as politicas", " regras da loja", " permissoes",
+    " disregard", " override", " jailbreak", " previous instructions", " system prompt",
+    " assistant must", " assistant should", " administrador", " admin ",
 )
 
 EXTRACTOR_PERSONA = (
@@ -81,7 +83,8 @@ EXTRACTOR_PERSONA = (
 def fold(text: str) -> str:
     """Minúsculas, sem acento, pontuação → espaço, com sentinelas de borda."""
     decomposed = unicodedata.normalize("NFKD", text.lower())
-    base = "".join(c for c in decomposed if not unicodedata.combining(c))
+    # Cf (zero-width, bidi) some: "ig\u200bnore" precisa virar "ignore", não "ig nore".
+    base = "".join(c for c in decomposed if not unicodedata.combining(c) and unicodedata.category(c) != "Cf")
     return " " + " ".join("".join(c if c.isalnum() or c == " " else " " for c in base).split()) + " "
 
 
@@ -151,6 +154,7 @@ async def extract_and_store(store: DataStore, customer_key: str, message: str, *
 
     now = utcnow()
     writes: list[tuple[dict, dict | None]] = []  # (novo documento, documento antigo a desativar)
+    already_replaced: set[str] = set()
     seen_norms = {doc["fact_norm"] for doc in known if doc.get("fact_norm")}
     for candidate in _parse_candidates(raw)[:MAX_EXTRACTED_FACTS]:
         text = candidate["fact"].strip()[:MAX_FACT_CHARS]
@@ -166,6 +170,8 @@ async def extract_and_store(store: DataStore, customer_key: str, message: str, *
         if price and replaced is None:
             # Só pode haver UM teto ativo: dois orçamentos disputariam o filtro do catálogo.
             replaced = next((doc for doc in known if _clean_budget(doc.get("max_price_brl"))), None)
+        if replaced is not None and replaced["_id"] in already_replaced:
+            replaced = None  # um fato só é substituído uma vez por turno; o resto entra como novo
         category = candidate.get("category") if candidate.get("category") in CATEGORIES else "contexto"
         doc = {"_id": f"mem-{uuid.uuid4().hex[:16]}", "customer_key": customer_key, "fact": text,
                "fact_norm": norm, "category": category, "active": True,
@@ -173,6 +179,8 @@ async def extract_and_store(store: DataStore, customer_key: str, message: str, *
         if price:
             doc["max_price_brl"] = price
         seen_norms.add(norm)
+        if replaced is not None:
+            already_replaced.add(replaced["_id"])
         writes.append((doc, replaced))
 
     room = MAX_ACTIVE_FACTS - await store.count("customer_memory", {"customer_key": customer_key, "active": True})
@@ -184,13 +192,17 @@ async def extract_and_store(store: DataStore, customer_key: str, message: str, *
     if not bounded:
         return []
 
-    async with store.transaction() as tx:
-        for doc, replaced in bounded:
-            await store.insert_one("customer_memory", doc, session=tx)
-            if replaced is not None:
-                await store.update_one("customer_memory", {"_id": replaced["_id"]},
-                                       {"$set": {"active": False, "superseded_by": doc["_id"], "updated_at": now}},
-                                       session=tx)
+    try:
+        async with store.transaction() as tx:
+            for doc, replaced in bounded:
+                await store.insert_one("customer_memory", doc, session=tx)
+                if replaced is not None:
+                    await store.update_one("customer_memory", {"_id": replaced["_id"]},
+                                           {"$set": {"active": False, "superseded_by": doc["_id"], "updated_at": now}},
+                                           session=tx)
+    except Exception:  # noqa: BLE001 — memória nunca derruba o turno; a transação já desfez o que gravou
+        logger.warning("gravação de memória falhou (customer_key=%s)", customer_key, exc_info=True)
+        return []
     return [{"fact": doc["fact"], "category": doc["category"]} for doc, _ in bounded]
 
 

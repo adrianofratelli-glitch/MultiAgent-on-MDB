@@ -113,10 +113,11 @@ async def test_classifier_blocks_cache_write_of_paraphrase():
     assert cached(atlas) == []
 
 
-async def test_classifier_error_blocks_cache_write():
+async def test_classifier_error_keeps_customer_scope_but_never_writes_global():
     atlas = Atlas(probe_error=RuntimeError("fora"))
-    assert await store_turn(atlas, GENERIC) == "classificador"
-    assert cached(atlas) == []
+    assert await store_turn(atlas, GENERIC) is None
+    scopes = [doc["scope"] for name, doc in atlas.written if name == "semantic_cache"]
+    assert scopes == ["customer"]  # o global espera o classificador decidir
 
 
 async def test_classifier_not_called_when_turn_was_never_going_to_be_cached():
@@ -143,3 +144,33 @@ async def test_demo_mode_fallback_classifier_blocks_probe_paraphrase_and_lets_ge
     assert len(await store.find_many("semantic_cache", {})) == 2
     hit = await cascade_lookup(store, message=GENERIC, **{**KW, "customer_key": "bruno", "session_id": "s9"})
     assert hit.hit and hit.fonte == "cache"
+
+
+# ---- sem veredito: fecha só onde há risco de vazamento (o escopo global) ----
+
+class Scoped(Atlas):
+    def __init__(self, fonte, scope, **kw):
+        super().__init__(**kw)
+        self.fonte, self.scope = fonte, scope
+
+    async def aggregate(self, name, pipeline, *, brain=False):
+        rows = await super().aggregate(name, pipeline, brain=brain)
+        if name != tc.PROBES_COLLECTION:
+            rows[0].update(fonte=self.fonte, scope=self.scope)
+        return rows
+
+
+async def test_undecided_classifier_still_serves_session_and_customer_hits():
+    for fonte, scope in (("curto_prazo", None), ("cache", "customer")):
+        result = await cascade_lookup(Scoped(fonte, scope, probe_error=RuntimeError("fora")), message=GENERIC, **KW)
+        assert result.hit and result.classifier["error"], (fonte, scope)
+
+
+async def test_undecided_classifier_discards_global_hits():
+    result = await cascade_lookup(Scoped("cache", "global", probe_error=RuntimeError("fora")), message=GENERIC, **KW)
+    assert not result.hit and result.personal_reason == "classificador"
+
+
+async def test_decisive_personal_verdict_discards_even_customer_scope():
+    result = await cascade_lookup(Scoped("cache", "customer", probe_score=0.9), message=PARAPHRASE, **KW)
+    assert not result.hit and result.personal_reason == "classificador"
