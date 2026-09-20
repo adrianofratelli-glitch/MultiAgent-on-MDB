@@ -15,8 +15,16 @@ Duas regras que o conjunto de probes codifica e que devem ser mantidas:
      enxerga, e uma área só recebe threshold próprio quando a medição dela sustenta.
 
 Uso:
-    python backend/calibrate_thresholds.py           # mede e SUGERE
-    python backend/calibrate_thresholds.py --apply   # grava em ai_brain.guardrail_policies
+    python backend/calibrate_thresholds.py                        # mede e SUGERE (todos os alvos)
+    python backend/calibrate_thresholds.py --apply                # grava os limiares medidos
+    python backend/calibrate_thresholds.py --only turn --apply    # recalibra só um alvo
+    python backend/calibrate_thresholds.py --only turn --allow-errors --apply
+        # sem separação perfeita, grava o limiar de MENOR ERRO medido e lista os probes que erram
+        # (vale só para o classificador de turno; o denylist não tolera falso alarme)
+
+Alvos: `denylist` (guardrail_denylist → guardrail_policies.vector_threshold) e `turn` (turn_probes →
+turn_classifier_config.threshold). Os probes do alvo `turn` são DISTINTOS dos semeados em
+turn_classifier.PERSONAL_PROBES: medir contra o próprio seed só mediria o índice.
 
 Rode sempre que trocar o modelo de embedding, o cluster ou as frases seedadas.
 """
@@ -24,7 +32,9 @@ Rode sempre que trocar o modelo de embedding, o cluster ou as frases seedadas.
 import argparse
 import asyncio
 import sys
+from typing import Callable
 
+from app import turn_classifier
 from app.config import get_settings
 from app.database import DataStore, utcnow
 
@@ -45,8 +55,47 @@ DENYLIST_PROBES = [
 ]
 
 
-async def top_score(store: DataStore, collection: str, index: str, path: str,
-                    query: str, filters: dict | None = None) -> float:
+# Classificador de turno: True = turno PESSOAL (depende da memória do cliente), False = genérico.
+# Frases distintas das semeadas. Os negativos não podem ser pegos pelo portão de frases (teste garante),
+# senão não medem o classificador.
+TURN_PROBES = [
+    (True, "me fala o que você tem anotado sobre o meu perfil", None),
+    (True, "qual era mesmo o valor máximo que eu topo pagar?", None),
+    (True, "como você costuma me chamar?", None),
+    (True, "você guardou o meu jeito de ser tratado?", None),
+    (True, "anota aí que eu prefiro receber por SMS", None),
+    (True, "o que você já sabe sobre mim?", None),
+    (True, "qual o nome pelo qual você me conhece?", None),
+    (True, "guardou aquilo do meu limite de gastos?", None),
+    (True, "atende só por whatsapp comigo, ok?", None),
+    (True, "como está o meu perfil aí no sistema?", None),
+    (True, "o meu jeito de ser chamado mudou, atualiza aí", None),
+    (True, "me lembra o que combinamos sobre o valor máximo", None),
+    (False, "como faço para trocar um produto?", None),
+    (False, "qual o prazo de entrega para São Paulo?", None),
+    (False, "quais formas de pagamento vocês aceitam?", None),
+    (False, "como funciona a garantia dos produtos?", None),
+    (False, "qual é a política de reembolso?", None),
+    (False, "recomende um fone de ouvido bluetooth", None),
+    (False, "quem é o presidente do brasil?", None),
+    (False, "como você pode me ajudar?", None),
+    (False, "quais produtos estão em promoção?", None),
+    (False, "vocês entregam em domicílio?", None),
+    (False, "posso pagar em 10 vezes?", None),
+    (False, "como rastrear uma encomenda?", None),
+    (False, "qual o horário de atendimento?", None),
+    (False, "como cancelo uma compra?", None),
+]
+
+TARGETS = ("denylist", "turn")
+
+
+def denylist_filters(area: str | None) -> dict:
+    return {"area": {"$in": ["global", area]}, "active": True, "layer": "semantic"}
+
+
+async def top_score(store: DataStore, collection: str, index: str, path: str, query: str,
+                    filters: dict | None = None, *, brain: bool = False) -> float:
     stage = {"index": index, "path": path, "query": {"text": query}, "model": "voyage-4",
              "numCandidates": 50, "limit": 1}
     if filters:
@@ -54,20 +103,39 @@ async def top_score(store: DataStore, collection: str, index: str, path: str,
     documents = await store.aggregate(collection, [
         {"$vectorSearch": stage},
         {"$project": {"phrase": 1, "score": {"$meta": "vectorSearchScore"}}},
-    ])
+    ], brain=brain)
     return float(documents[0]["score"]) if documents else 0.0
 
 
+def best_with_errors(positives: list[tuple[float, str]], negatives: list[tuple[float, str]]):
+    """Limiar que minimiza (falsos negativos + falsos positivos) — medido, não chutado.
+
+    Candidatos = pontos médios entre scores vizinhos. Empate → menos falsos negativos: deixar passar
+    um turno pessoal custa mais do que pular o cache."""
+    scores = sorted({score for score, _ in positives + negatives})
+    best = None
+    for low, high in zip(scores, scores[1:]):
+        threshold = (low + high) / 2
+        missed = [text for score, text in positives if score < threshold]
+        false_alarms = [text for score, text in negatives if score >= threshold]
+        key = (len(missed) + len(false_alarms), len(missed), -threshold)
+        if best is None or key < best[0]:
+            best = (key, threshold, missed, false_alarms)
+    return best[1], best[2], best[3]
+
+
 async def calibrate(store: DataStore, collection: str, index: str, path: str,
-                    probes: list[tuple[bool, str, str]], label: str) -> float | None:
+                    probes: list[tuple[bool, str, str | None]], label: str, *, brain: bool = False,
+                    filters_for: Callable[[str | None], dict | None] | None = None,
+                    allow_errors: bool = False) -> float | None:
     positives: list[tuple[float, str]] = []
     negatives: list[tuple[float, str]] = []
     print(f"\n=== {label} ===")
-    for should_block, text, area in probes:
-        filters = {"area": {"$in": ["global", area]}, "active": True, "layer": "semantic"}
-        score = await top_score(store, collection, index, path, text, filters)
-        (positives if should_block else negatives).append((score, f"[{area}] {text}"))
-        marker = "DEVE bloquear" if should_block else "NÃO bloqueia "
+    for should_match, text, area in probes:
+        filters = filters_for(area) if filters_for else None
+        score = await top_score(store, collection, index, path, text, filters, brain=brain)
+        (positives if should_match else negatives).append((score, f"[{area}] {text}"))
+        marker = "DEVE casar " if should_match else "NÃO casa   "
         print(f"  [{marker}] {score:.4f}  ({area}) {text[:52]}")
     if not positives or not negatives:
         print("  ⚠ faltam probes positivos/negativos — sem sugestão")
@@ -78,21 +146,54 @@ async def calibrate(store: DataStore, collection: str, index: str, path: str,
         print(f"  ⚠ SEM SEPARAÇÃO: max(negativos)={low:.4f} ≥ min(positivos)={high:.4f}.")
         print(f"     negativo mais alto:  {worst_negative[1][:70]}")
         print(f"     positivo mais baixo: {worst_positive[1][:70]}")
-        print("     Nenhum threshold separa os dois. Cubra a intenção do positivo com mais uma "
-              "entrada seedada (ou reescreva a entrada que está vizinha do negativo) e remeça — "
-              "baixar o threshold na mão só troca falso-negativo por falso-positivo.")
-        return None
+        threshold, missed, false_alarms = best_with_errors(positives, negatives)
+        threshold = round(threshold, 4)
+        print(f"     limiar de menor erro medido: {threshold} — {len(missed)} falso(s) negativo(s), "
+              f"{len(false_alarms)} falso(s) positivo(s)")
+        for text in missed:
+            print(f"       ✗ perdido (deveria casar): {text[:70]}")
+        for text in false_alarms:
+            print(f"       ✗ falso alarme (não deveria casar): {text[:70]}")
+        if not allow_errors:
+            print("     Não gravo por padrão. Cubra a intenção do positivo com outra entrada seedada "
+                  "(redação diferente do teste) e remeça, ou aceite o erro medido com --allow-errors. "
+                  "Baixar o threshold na mão só troca falso-negativo por falso-positivo.")
+            return None
+        print("     --allow-errors: usando o limiar de menor erro medido.")
+        return threshold
     suggested = round((low + high) / 2, 4)
     print(f"  banda: negativos ≤ {low:.4f} · positivos ≥ {high:.4f} · margem {high - low:.4f}")
     print(f"  → threshold sugerido: {suggested}")
     return suggested
 
 
+async def apply_turn_threshold(store: DataStore, threshold: float) -> None:
+    await store.update_one(
+        turn_classifier.CONFIG_COLLECTION, {"active": True},
+        {"$set": {"threshold": threshold, "updated_at": utcnow(),
+                  "calibration": {"measured_at": utcnow().strftime("%Y-%m-%d"),
+                                  "method": "backend/calibrate_thresholds.py"}}},
+        upsert=True, brain=True,
+    )
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Calibra limiares semânticos por medição.")
+    parser.add_argument("--apply", action="store_true", help="grava os limiares medidos")
+    parser.add_argument("--only", nargs="+", choices=TARGETS,
+                        help="mede/grava só estes alvos (padrão: todos), sem reescrever o resto")
+    parser.add_argument("--allow-errors", action="store_true",
+                        help="alvo `turn`: sem separação perfeita, usa o limiar de menor erro medido")
+    return parser
+
+
+def selected_targets(args: argparse.Namespace) -> set[str]:
+    return set(args.only or TARGETS)
+
+
 async def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--apply", action="store_true",
-                        help="grava os thresholds sugeridos em ai_brain.guardrail_policies")
-    args = parser.parse_args()
+    args = build_parser().parse_args()
+    wanted = selected_targets(args)
 
     settings = get_settings()
     store = DataStore(settings)
@@ -102,29 +203,42 @@ async def main() -> None:
         sys.exit("DEMO_MODE/sem MONGODB_URI: não há índice vetorial para medir.")
 
     try:
-        global_threshold = await calibrate(
-            store, "guardrail_denylist", "denylist_autoembed_v1", "phrase",
-            DENYLIST_PROBES, "Denylist semântico (guardrail_denylist)",
-        )
-        # Threshold por área só quando a área tem probes dos dois lados: uma área só pode ser
-        # mais rígida se a medição dela sustentar, não por um delta arbitrário sobre o global.
+        global_threshold = None
         per_area: dict[str, float] = {}
-        for area in sorted({probe[2] for probe in DENYLIST_PROBES if probe[2] != "default"}):
-            area_probes = [probe for probe in DENYLIST_PROBES if probe[2] == area]
-            if len({probe[0] for probe in area_probes}) < 2:
-                continue
-            area_threshold = await calibrate(
+        if "denylist" in wanted:
+            global_threshold = await calibrate(
                 store, "guardrail_denylist", "denylist_autoembed_v1", "phrase",
-                area_probes, f"Denylist — área '{area}'",
+                DENYLIST_PROBES, "Denylist semântico (guardrail_denylist)", filters_for=denylist_filters,
             )
-            if area_threshold is not None:
-                per_area[area] = area_threshold
+            # Threshold por área só quando a área tem probes dos dois lados: uma área só pode ser
+            # mais rígida se a medição dela sustentar, não por um delta arbitrário sobre o global.
+            for area in sorted({probe[2] for probe in DENYLIST_PROBES if probe[2] != "default"}):
+                area_probes = [probe for probe in DENYLIST_PROBES if probe[2] == area]
+                if len({probe[0] for probe in area_probes}) < 2:
+                    continue
+                area_threshold = await calibrate(
+                    store, "guardrail_denylist", "denylist_autoembed_v1", "phrase",
+                    area_probes, f"Denylist — área '{area}'", filters_for=denylist_filters,
+                )
+                if area_threshold is not None:
+                    per_area[area] = area_threshold
+
+        turn_threshold = None
+        if "turn" in wanted:
+            turn_threshold = await calibrate(
+                store, turn_classifier.PROBES_COLLECTION, turn_classifier.PROBES_INDEX,
+                turn_classifier.PROBES_PATH, TURN_PROBES,
+                "Classificador de turno (turn_probes)", brain=True, allow_errors=args.allow_errors,
+            )
 
         if not args.apply:
-            print("\n(dry-run) Rode com --apply para gravar em ai_brain.guardrail_policies.")
+            print("\n(dry-run) Rode com --apply para gravar.")
             return
 
         now = utcnow()
+        if turn_threshold is not None:
+            await apply_turn_threshold(store, turn_threshold)
+            print(f"✓ turn_classifier_config.threshold ← {turn_threshold}")
         if global_threshold is not None:
             for policy in await store.find_many("guardrail_policies", {"active": True}, limit=50, brain=True):
                 area = policy.get("area", "default")
