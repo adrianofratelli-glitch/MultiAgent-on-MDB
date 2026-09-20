@@ -8,7 +8,7 @@ import pytest
 from app.budget import TurnBudget
 from app.cascade import cascade_store_episode
 from app.config import Settings
-from app.database import DataStore
+from app.database import DataStore, utcnow
 from app.memory import (active_budget, active_facts, extract_and_store, looks_like_instruction,
                         should_extract)
 
@@ -202,3 +202,15 @@ async def test_episode_repeats_do_not_grow_unbounded():
     for _ in range(3):
         await cascade_store_episode(st, customer_key=KEY, intent="recomendacao", agent="product_agent")
     assert len(await st.find_many("long_term_memory", {"customer_key": KEY})) == 1
+
+
+# ---- dados legados no cluster (fact_type/value, sem `fact`): só aparecem em modo live ----
+
+async def test_legacy_fact_documents_do_not_break_extraction_or_reads():
+    st = store()
+    await st.insert_one("customer_memory", {"customer_key": KEY, "fact_type": "price_sensitive", "value": "Cliente sensível a preço", "active": True, "created_at": utcnow()})
+    assert await active_facts(st, KEY) == ["Cliente sensível a preço"]
+    assert await active_budget(st, KEY) is None
+    llm = FakeLLM({"facts": [fact("Cliente prefere ser chamado de Bruno")]})
+    assert await run(st, "me chame de Bruno", llm)
+    assert "1. Cliente sensível a preço" in llm.calls[0]["dynamic_context"]

@@ -129,6 +129,11 @@ def _parse_candidates(raw: str | None) -> list[dict]:
     return [item for item in facts if isinstance(item, dict) and isinstance(item.get("fact"), str)]
 
 
+def _text(doc: dict) -> str:
+    """Texto do fato. Documentos legados (fact_type/value, anteriores ao extrator LLM) ainda existem no cluster."""
+    return str(doc.get("fact") or doc.get("value") or "")
+
+
 async def _active_docs(store: DataStore, customer_key: str, limit: int = MAX_KNOWN_FACTS) -> list[dict]:
     return await store.find_many("customer_memory", {"customer_key": customer_key, "active": True},
                                  limit=limit, sort=[("created_at", -1)])
@@ -140,7 +145,7 @@ async def extract_and_store(store: DataStore, customer_key: str, message: str, *
     if not should_extract(message) or not llm or not getattr(llm, "client", None) or not agent_doc:
         return []
     known = await _active_docs(store, customer_key)
-    known_list = "\n".join(f"{i + 1}. {doc['fact']}" for i, doc in enumerate(known)) or "(nenhum)"
+    known_list = "\n".join(f"{i + 1}. {_text(doc)}" for i, doc in enumerate(known)) or "(nenhum)"
     try:
         raw, _ = await llm.complete(
             agent={**agent_doc, "persona": EXTRACTOR_PERSONA, "max_output_tokens": 400},
@@ -155,7 +160,7 @@ async def extract_and_store(store: DataStore, customer_key: str, message: str, *
     now = utcnow()
     writes: list[tuple[dict, dict | None]] = []  # (novo documento, documento antigo a desativar)
     already_replaced: set[str] = set()
-    seen_norms = {doc["fact_norm"] for doc in known if doc.get("fact_norm")}
+    seen_norms = {doc.get("fact_norm") or _fact_norm(_text(doc)) for doc in known}
     for candidate in _parse_candidates(raw)[:MAX_EXTRACTED_FACTS]:
         text = candidate["fact"].strip()[:MAX_FACT_CHARS]
         norm = _fact_norm(text)
@@ -207,7 +212,7 @@ async def extract_and_store(store: DataStore, customer_key: str, message: str, *
 
 
 async def active_facts(store: DataStore, customer_key: str) -> list[str]:
-    return [doc["fact"] for doc in await _active_docs(store, customer_key)]
+    return [text for doc in await _active_docs(store, customer_key) if (text := _text(doc))]
 
 
 async def active_budget(store: DataStore, customer_key: str) -> float | None:

@@ -138,8 +138,8 @@ export default function AiBrainInspector({ customerKey, run, conversationId }) {
             <div key={item._id || index} className="insp-row">
               {(item.question_text || item.question) && <div className="insp-q mono">Q: {short(item.question_text || item.question, 160)}</div>}
               {item.answer && <div className="insp-a">A: {short(item.answer, 160)}</div>}
-              {item.fact && <div className="insp-q">🔖 {item.fact} <span className="dim">({item.category})</span></div>}
-              {!item.question_text && !item.question && !item.fact && item.text && <div className="insp-q">{short(item.text, 160)}</div>}
+              {(item.fact || item.value) && <div className="insp-q">🔖 {item.fact || item.value} <span className="dim">({item.category || item.fact_type})</span></div>}
+              {!item.question_text && !item.question && !item.fact && !item.value && item.text && <div className="insp-q">{short(item.text, 160)}</div>}
               {item.session_id && (
                 <div className="insp-scope short">
                   sessão {short(item.session_id, 22)}
