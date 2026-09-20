@@ -44,6 +44,8 @@ cd backend && pytest tests/test_router.py::test_name -q   # single test
 python backend/tests/smoke.py http://127.0.0.1:8031        # black-box smoke test against a running server; nonzero exit on failure
 python backend/eval.py http://127.0.0.1:8031               # golden-dataset eval (seed_data.py:EVAL_CASES), writes pass/fail history to eval_runs
 cd backend && python calibrate_thresholds.py               # measures the denylist score band against labeled probes (--apply writes vector_threshold to guardrail_policies)
+cd backend && python calibrate_thresholds.py --only turn --apply   # one target only; --allow-errors (turn only) writes the lowest-error threshold and lists the probes that miss
+cd backend && python seed_turn_probes.py                   # explicit step: creates turn_probes + its vector index in the brain DB; deliberately NOT part of seed.py
 ```
 
 Before a live demo, pre-warm the semantic cache so the customer's first click isn't a cold multi-hop LLM chain:
