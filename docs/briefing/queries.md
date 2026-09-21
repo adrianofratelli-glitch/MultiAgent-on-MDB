@@ -117,6 +117,36 @@ A maior parte das leituras/escritas simples passa pela abstração `DataStore` (
 
 ---
 
+### 1.4b Pré-filtro de orçamento no catálogo (o servidor aplica, não o modelo)
+
+`agents.py:build_product_pipeline` — quando o cliente tem `max_price_brl` ativo em `customer_memory`, o teto entra no `filter` do próprio `$vectorSearch` (pré-filtro NATIVO: o grafo ANN só percorre vetores que passam). `price` é campo `filter` em `products_autoembed_v1` — conferido na definição do índice, e há teste que impede o pipeline de filtrar por campo não declarado.
+
+```python
+{"$vectorSearch": {
+    "index": "products_autoembed_v1", "path": "search_text",
+    "query": {"text": message}, "model": "voyage-4",
+    "filter": {"active": True, "price": {"$lte": 400}, "category": "Áudio"},
+    "numCandidates": 50, "limit": 8,
+}}
+```
+
+Alternativa descartada: ler N candidatos e cortar com `$match` depois — mais lento e perde item barato quando os primeiros do ranking são todos caros.
+
+### 1.4c `$vectorSearch` — classificador de turno pessoal
+
+`turn_classifier.py:classify` — roda **só num HIT de cache e antes de gravar**, nunca num MISS. Limiar medido (0,7162) vive em `<brain>.turn_classifier_config`.
+
+```python
+[
+  {"$vectorSearch": {"index": "turn_probes_vs", "path": "phrase",
+                     "query": {"text": message}, "model": "voyage-4",
+                     "numCandidates": 50, "limit": 1}},
+  {"$project": {"phrase": 1, "_id": 0, "score": {"$meta": "vectorSearchScore"}}},
+]
+```
+
+Erro, índice ausente ou limiar não medido ⇒ trata como pessoal (falha fechada). Em `DEMO_MODE` cai numa sobreposição de palavras contra os probes do código.
+
 ### 1.5 `$vectorSearch` — denylist semântico (guardrail)
 **Onde**: `backend/app/guardrails.py:31-61` (`semantic_denylist`).
 
@@ -240,5 +270,6 @@ Referenciados por nome nas pipelines acima — não são criados por `create_sta
 | `long_term_autoembed_v1` | Vector Search (Automated Embedding) | `long_term_memory` | `text` | `cascade.py` |
 | `products_autoembed_v1` | Vector Search (Automated Embedding) | `products_catalog` | `search_text` | `agents.py:search_products` |
 | `denylist_autoembed_v1` | Vector Search (Automated Embedding) | `guardrail_denylist` | `phrase` | `guardrails.py` |
+| `turn_probes_vs` | Vector Search (Automated Embedding) | `<brain>.turn_probes` | `phrase` | `turn_classifier.py` — criado por `seed_turn_probes.py`, fora do `seed.py` |
 | `kb_autoembed_v1` | Vector Search (Automated Embedding) | `kb_articles` | `content` | `retrieval.py` |
 | `kb_lexical_v1` | Atlas Search (BM25, analyzer português) | `kb_articles` | `title`, `content` | `retrieval.py` |

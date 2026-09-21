@@ -2,6 +2,7 @@
 
 - Status: aceito
 - Data: 2026-07-15
+- Complementado por: [ADR-002](ADR-002-memoria-llm-e-turno-pessoal.md) (memória extraída por LLM, turno pessoal fora do cache) e [ADR-003](ADR-003-guardrail-em-duas-faixas.md) (guardrail em duas faixas, pergunta fora de escopo)
 
 ## Contexto
 
@@ -17,7 +18,7 @@ Usar MongoDB Atlas como plano de dados e de coordenação:
 - `agent_handoffs` e `agent_traces` são eventos independentes e consultáveis;
 - dados operacionais, memória longa, cache e guardrails mantêm filtros de tenant nos próprios documentos e índices.
 
-O orquestrador não responde ao cliente. Casos inequívocos não pagam uma chamada de modelo; ambiguidades passam pelo orquestrador. Um turno percorre no máximo quatro agentes, com detecção de ciclo. Perguntas compostas independentes de pedido + fatura usam fan-out paralelo; cadeias com dependência continuam sequenciais.
+O orquestrador não responde ao cliente. Casos inequívocos não pagam uma chamada de modelo; ambiguidades passam pelo orquestrador. Um turno percorre no máximo cinco agentes (`MAX_HOPS = 5`), com detecção de ciclo. Perguntas compostas independentes de pedido + fatura usam fan-out paralelo; cadeias com dependência continuam sequenciais.
 
 Antes de chamar um modelo, a aplicação consulta uma cascata de memória:
 

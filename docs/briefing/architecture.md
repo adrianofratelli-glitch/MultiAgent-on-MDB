@@ -30,7 +30,10 @@ PoV de atendimento ao cliente multiagente onde o **MongoDB Atlas é tanto o data
 | `backend/app/agents.py` | Os 7 runners de agente (`RUNNERS`), lógica de negócio de cada um |
 | `backend/app/graph.py` | `$graphLookup` sobre `orders` — cadeia de reposição/troca |
 | `backend/app/cascade.py` | Cascata de cache semântico (curto prazo → cache global) via `$vectorSearch`/`$unionWith` |
-| `backend/app/memory.py` | Extração e supersessão de fatos do cliente (`customer_memory`) |
+| `backend/app/memory.py` | Extrator LLM de fatos do cliente + dedup, supersessão e `looks_like_instruction` (`customer_memory`) |
+| `backend/app/turn_classifier.py` | Classificador vetorial "este turno depende da memória deste cliente?" (`<brain>.turn_probes`) |
+| `backend/app/warmup.py` | Aquecimento automático do cache semântico (no start e quando a UI abre) |
+| `backend/app/demo_reset.py` | Desfaz o que a demo gravou num cliente e reativa o que ela substituiu |
 | `backend/app/retrieval.py` | Pipelines de busca híbrida (`kb_articles`) — vetor, lexical, `$rankFusion` |
 | `backend/app/guardrails.py` | 3 camadas de guardrail: denylist estático, denylist vetorial, classificador LLM |
 | `backend/app/database.py` | `DataStore` — abstração Atlas real vs. in-memory; índices e validators |
@@ -41,12 +44,13 @@ PoV de atendimento ao cliente multiagente onde o **MongoDB Atlas é tanto o data
 
 1. **Entrada** — `POST /api/chat`, JWT decodifica `customer_key` (nunca vem do payload).
 2. **Guardrail de entrada** — denylist estático → denylist vetorial (Atlas Vector Search) → LLM classificador (só se necessário).
-3. **Extração de memória** — fatos em 3ª pessoa extraídos por LLM (com `max_price_brl` estruturado para orçamento), deduplicados e gravados com supersessão transacional em `customer_memory`.
-4. **Roteamento** — regra determinística por keyword (`cheap_route`) prioritária; LLM só decide quando não há sinal de regra nenhum. Fan-out paralelo (`order_agent` + `billing_agent`) para perguntas compostas genuinamente independentes.
-5. **Cascata de cache semântico** — `$vectorSearch` em `short_term_memory` unido (`$unionWith`) com `semantic_cache`; HIT retorna sem chamar LLM nenhum.
-6. **Loop de agentes (handoff)** — até `MAX_HOPS = 5` agentes em cadeia, cada um podendo pedir handoff explícito para outro. Cada runner lê o Mongo com filtro de ownership reconstruído, e opcionalmente sintetiza a resposta final via LLM sobre o documento já buscado (nunca o LLM decide o que buscar).
-7. **Guardrail de saída** — checa vazamento de segredo/marcador interno.
-8. **Persistência** — conversa (`agent_conversations`, delta via `$push`/`$slice`), handoffs (`agent_handoffs`), trace completo (`agent_traces` + Langfuse), métricas cumulativas por collection+operação.
+3. **Escopo** — sem sinal de domínio, o turno termina numa orientação determinística: sem agente, sem LLM, **0 tokens**, marcado como `out_of_scope` na timeline (ADR-003).
+4. **Extração de memória** — fatos em 3ª pessoa extraídos por LLM (com `max_price_brl` estruturado para orçamento), deduplicados e gravados com supersessão transacional em `customer_memory`; falha fechada, nunca derruba o turno (ADR-002).
+5. **Roteamento** — regra determinística por keyword (`cheap_route`) prioritária; LLM só decide quando não há sinal de regra nenhum. Fan-out paralelo (`order_agent` + `billing_agent`) para perguntas compostas genuinamente independentes.
+6. **Cascata de cache semântico** — `$vectorSearch` em `short_term_memory` unido (`$unionWith`) com `semantic_cache`; HIT retorna sem chamar LLM nenhum — mas turno pessoal não lê nem grava esse cache (ADR-002).
+7. **Loop de agentes (handoff)** — até `MAX_HOPS = 5` agentes em cadeia, cada um podendo pedir handoff explícito para outro. Cada runner lê o Mongo com filtro de ownership reconstruído, e opcionalmente sintetiza a resposta final via LLM sobre o documento já buscado (nunca o LLM decide o que buscar).
+8. **Guardrail de saída** — checa vazamento de segredo/marcador interno.
+9. **Persistência** — conversa (`agent_conversations`, delta via `$push`/`$slice`), handoffs (`agent_handoffs`), trace completo (`agent_traces` + Langfuse), métricas cumulativas por collection+operação.
 
 Diagrama de topologia e sequência mais detalhado (Mermaid) já existe em `../architecture.md` (nível de repositório) — este arquivo não duplica os diagramas, foca no "porquê".
 
@@ -56,6 +60,8 @@ Diagrama de topologia e sequência mais detalhado (Mermaid) já existe em `../ar
 - **LLM nunca escolhe o que buscar**: toda leitura no Mongo é construída em Python com filtro de ownership; o LLM só redige a frase final sobre o documento já retornado (`agents.py:llm_synthesize`). Isso mantém a segurança de dados fora do raciocínio do modelo.
 - **Roteamento determinístico é a regra, LLM é a exceção**: `cheap_route` (keyword + prioridade seedada) resolve a maioria; o LLM só decide quando não há nenhum sinal de regra, e nunca sobrescreve uma decisão determinística já confiante — sampling variance tornava o roteamento não-reprodutível quando podia.
 - **Handoff sequencial vs. fan-out paralelo**: cadeias com dependência real (diagnosticar → recomendar → efetivar) são sequenciais; perguntas genuinamente independentes (status do pedido + valor da fatura) rodam em paralelo via `asyncio.gather`, restrito ao par `order_agent`/`billing_agent` de propósito.
+- **Limiar é medido, nunca escolhido**: os três cortes semânticos (denylist, bloqueio direto do denylist, classificador de turno) saem de `calibrate_thresholds.py` contra probes rotulados — e os probes de teste são distintos dos semeados, senão o que se mede é o índice, não a separação. Ver ADR-002 e ADR-003.
+- **Falha fechada, mas só onde há risco**: sem veredito do classificador de turno, descarta-se o HIT de cache **global**; o da própria sessão continua servindo, porque não sai do dono. Fechar tudo quebrava o cache sem ganho de segurança.
 - **Escrita é exceção, não regra**: das 7 agentes só 4 têm qualquer efeito de escrita (`order_agent`, `loyalty_agent`, `logistics_agent`, `support_agent`), e cada write é restrito a um allowlist de valores/campos aprovados — nunca um `$set` arbitrário vindo do LLM.
 - **Sem framework de grafo**: a coordenação é um loop Python com controle explícito de visitas, revisão e profundidade máxima — decisão consciente de não trazer uma dependência de orquestração externa para uma PoV cujo ponto de venda é "o MongoDB já é o plano de coordenação".
 
@@ -70,3 +76,5 @@ Diagrama de topologia e sequência mais detalhado (Mermaid) já existe em `../ar
 - Métricas (`metrics.py`) são in-process, resetam a cada restart — sem agregação entre instâncias.
 - LLM synthesis e o guardrail semântico custam tokens Anthropic reais por turno — ok para demo, precisaria de cache/sampling antes de volume alto de produção.
 - Sem containerização (sem Dockerfile/docker-compose) — dev local via venv + npm.
+- `DEMO_MODE` **esconde** classes inteiras de bug do driver real (datetime sem fuso, `ObjectId` cru na timeline, documento legado sem o campo novo) — os três foram achados só em modo LIVE, com a suíte offline verde. Por isso existem as suítes `tests/test_live*.py` e o hook `pre-push`.
+- A orientação de fora de escopo é texto fixo, igual para qualquer assunto — resposta mais natural custaria uma chamada de LLM por pergunta alheia.

@@ -26,7 +26,19 @@ Componentes: `ChatPanel` (`App.jsx:70-120`), `MongoCacheSavings` (`App.jsx:18-68
 8. **Painel de Execução** (`Timeline`) — lista cronológica de todo evento do turno: guardrail, roteamento, cache, cada hop de agente, handoff, memória, com filtro/detalhe por evento (`QueryDetails.jsx` expõe filtro Mongo e resultado bruto de cada operação).
 9. Chips de **"posso seguir com"** — sugestões de próximo turno, cada uma pré-populada com a mensagem exata que dispara aquele fluxo (nunca leva a "não encontrei").
 
-Um clique em "Nova conversa" zera `conversation_id`, mensagens, timeline e métricas locais.
+**Roteiros de demo por identidade** (`GET /api/demo-scenarios`, ordenados por `position`): além dos cenários multiagente, cada uma das 4 identidades tem 6 chips que exercitam as três camadas de memória e o cache (`seed_data.py:MEMORY_DEMOS`, campo `demo_kind`):
+
+| Chip | O que prova |
+|---|---|
+| ⚡ Cache semântico | Pergunta genérica já aquecida — 1º clique é HIT, com tokens economizados |
+| 🕐 Curto prazo 1/2 e 2/2 | Pergunta e depois a reformulação na MESMA conversa → HIT em `short_term_memory` |
+| 🧠 Longo prazo: gravar | "me chame de X e nunca me ofereça acima de R$ N" → fatos em `customer_memory` |
+| 🧠 Longo prazo: usar | Recomendação respeitando o teto lido da memória (pré-filtro no `$vectorSearch`) |
+| 🧠 Longo prazo: atualizar | Novo teto → supersessão do fato antigo, recomendação muda |
+
+A ordem importa (o que um chip escreve o seguinte usa), por isso eles ficam **fora** do golden eval. A reformulação do curto prazo depende do índice vetorial, que o Atlas atualiza de forma assíncrona: se o 2º clique vier em segundos e errar, clicar de novo acerta.
+
+Um clique em **"Nova conversa"** zera `conversation_id`, mensagens, timeline e métricas locais. **"Reiniciar memória da demo"** (`POST /api/demo/reset`) vai além: desfaz o que a demo gravou NESTE cliente (fatos extraídos, episódios, curto prazo, cache do cliente) e reativa o que ela substituiu — o roteiro inteiro pode ser repetido sem a segunda rodada parecer que "não aconteceu nada" por deduplicação. Não toca no cache global aquecido nem em nenhum outro cliente.
 
 **Retomada de sessão**: ao trocar de identidade (ou no boot), `GET /api/conversations/latest` traz a última conversa daquele cliente (se houver, dentro da janela de 24h) e repopula mensagens + timeline do último turno — para não parecer que nada aconteceu numa sessão retomada.
 
@@ -35,6 +47,7 @@ Um clique em "Nova conversa" zera `conversation_id`, mensagens, timeline e métr
 Cartões executivos, não payload técnico bruto:
 - turnos concluídos, agentes exercitados (N/7), handoffs (+ retornos controlados), escritas de negócio, operações nativas (Vector Search/`$rankFusion`/`$graphLookup`), latência p95, cache hit rate, tokens economizados, guardrails bloqueados.
 - **Ledger por collection** — tabela `collection × {read, write, vector, hybrid, graph}`, populada em tempo real a cada turno.
+- Cartão de guardrail com três estados: aprovado, **BLOQUEADO** (segurança) e **🧭 Guardrail de escopo** (pergunta fora do domínio — não é ataque, e o painel não a apresenta como tal).
 - **Painel de qualidade (GoalSuccessRate)** — histórico de `python eval.py` contra o golden dataset (`eval_runs`), só visível em modo admin: taxa de sucesso, p95, USD por sucesso.
 - `<details>` "Ver payload técnico" — dump JSON cru de `GET /api/metrics` para quem quiser o número exato.
 
@@ -65,5 +78,6 @@ Cartões executivos, não payload técnico bruto:
 ```bash
 cd backend && python run.py            # porta 8031
 cd frontend && npm install && npm run dev   # porta 5191
-python backend/warmup.py http://127.0.0.1:8031   # pré-aquece cache antes de demo ao vivo
 ```
+
+O cache **se aquece sozinho**: o backend dispara ao subir e o frontend dispara de novo ao abrir a página (`POST /api/warmup`, execução única por vez, no máximo uma a cada 45 min). `python backend/warmup.py <url>` só força e acompanha o estado; `WARMUP_ON_START=0` desliga.

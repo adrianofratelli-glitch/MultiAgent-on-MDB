@@ -18,7 +18,7 @@
 
 ![Registry de agentes com modelo, escopo e chave liga/desliga por agente](docs/screenshots/04-agents-registry.png)
 
-**4. Tente quebrar.** Um jailbreak ou um prompt de falsa autoridade bate primeiro na denylist; o que for novo vai para um classificador LLM barato que escreve o padrão de volta na denylist, então a próxima tentativa sai de graça.
+**4. Tente quebrar — inclusive com pergunta aleatória.** Um jailbreak ou um prompt de falsa autoridade bate primeiro na denylist; o que for novo vai para um classificador LLM barato que escreve o padrão de volta na denylist, então a próxima tentativa sai de graça. O corte de bloqueio automático é **medido**, não chutado: o vetor não separa fraude de reembolso legítimo ("não recebi meu pedido, quero o dinheiro de volta" pontua 0,8664 contra uma frase de fraude), então acima do maior score legítimo medido ele bloqueia sozinho e na faixa ambígua quem decide é o classificador — cliente nunca é barrado por vizinhança vetorial. E "qual é a temperatura hoje?" não é ataque: recebe orientação educada com **0 tokens**, sem agente e sem cache, marcada como `🧭 Guardrail de escopo`.
 
 ![Painel de guardrails: bloqueios, denylist auto-alimentada, casos ambíguos sinalizados](docs/screenshots/06-guardrails.png)
 
@@ -57,16 +57,25 @@ O launcher usa backend sem reload e build otimizado do frontend por padrão. Par
 
 Sem cluster Atlas? `DEMO_MODE=1 AUTH_REQUIRED=1 python run.py` roda os mesmos contratos em memória (sem Vector Search / Change Streams). É o que a CI usa.
 
-Antes de uma demo ao vivo, `python backend/warmup.py` chama os prompts marcados uma vez e reporta quais respostas estáveis foram de fato admitidas pela política de cache `stable_v1`.
+**O cache se aquece sozinho.** O servidor dispara o warmup ao subir e o frontend dispara de novo ao abrir (`POST /api/warmup`, execução única por vez, no máximo uma a cada 45 min) — o primeiro clique numa pergunta genérica já é `cache_hit: true`. Nada de lembrar de rodar script antes da call; `python backend/warmup.py` só força e acompanha.
+
+A demo escreve de verdade (fatos, episódios, cache do cliente). O botão **"Reiniciar memória da demo"** (`POST /api/demo/reset`, só o cliente do JWT) desfaz o que ela gravou e reativa o que ela substituiu, para repetir o roteiro do zero.
 
 ## Testes
 
 ```bash
 cd backend
-pytest -q                       # unitários
+pytest -q                       # unitários (294, sem rede)
 python tests/smoke.py <url>     # caixa-preta
 python eval.py <url>            # golden dataset, resultados em eval_runs
+
+# modo LIVE — Atlas e LLM REAIS (custa tokens; identidade descartável, limpa o que gravou)
+LIVE=1 pytest tests/test_live.py -q            # ~2 min — contratos essenciais
+LIVE=1 pytest tests/test_live_random.py -q     # ~4 min — perguntas aleatórias e fora de escopo
+LIVE=1 pytest tests/test_live_scenarios.py -q  # ~7 min — jornada completa dos 4 clientes
 ```
+
+`DEMO_MODE` esconde bugs que só o driver real produz — datetime sem fuso, `ObjectId` cru na timeline, documento legado sem o campo novo. Os três foram encontrados exatamente assim, em modo LIVE, depois de a suíte offline estar verde. Por isso `git push` roda `.githooks/pre-push` (ruff + testes offline + `test_live.py`); ative num clone novo com `git config core.hooksPath .githooks`.
 
 O smoke repete a consulta personalizada dentro do mesmo `conversation_id` e
 exige HIT em `short_term_memory`; em seguida abre uma conversa nova e exige
@@ -78,8 +87,6 @@ de um build de produção limpo do frontend e auditoria de dependências. A CI
 usa a implementação determinística de data-store em memória e não exige
 credenciais de Atlas ou Anthropic.
 
-## Docs
-
 ## Observability opcional: Langfuse
 
 Com `LANGFUSE_PUBLIC_KEY`/`LANGFUSE_SECRET_KEY` no `.env` (`backend/app/langfuse_client.py`), cada turno vira UMA trace cobrindo a timeline inteira — roteamento, decisão de cache e cada hop de agente com seu handoff, não só um número de cache hit-rate isolado. Cada agente que respondeu vira uma generation; cache/handoff/memória/guardrail viram spans. Fail-open: sem as chaves, ou com o Langfuse fora do ar, vira no-op (`auth_check()` roda uma vez por processo, então um Langfuse indisponível nunca expõe um link que dê 404 no meio de uma demo). Badge "Ver trace no Langfuse" e card "Economia MongoDB" (cascata semântica + prompt cache) aparecem no cabeçalho do turno, na própria UI.
@@ -90,4 +97,4 @@ Defina `ENVIRONMENT=production`, `AUTH_REQUIRED=1` e `DEMO_TOKEN_ISSUANCE_ENABLE
 
 ## Documentação
 
-[Arquitetura](docs/architecture.md) · [ADR-001](docs/adr/ADR-001-arquitetura-multi-agente.md)
+[Arquitetura](docs/architecture.md) · [ADR-001 — coordenação orientada a documentos](docs/adr/ADR-001-arquitetura-multi-agente.md) · [ADR-002 — memória por LLM e turno pessoal fora do cache](docs/adr/ADR-002-memoria-llm-e-turno-pessoal.md) · [ADR-003 — guardrail em duas faixas e fora de escopo](docs/adr/ADR-003-guardrail-em-duas-faixas.md)
