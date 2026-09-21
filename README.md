@@ -18,7 +18,7 @@
 
 ![Registry de agentes com modelo, escopo e chave liga/desliga por agente](docs/screenshots/04-agents-registry.png)
 
-**4. Tente quebrar — inclusive com pergunta aleatória.** Um jailbreak ou um prompt de falsa autoridade bate primeiro na denylist; o que for novo vai para um classificador LLM barato que escreve o padrão de volta na denylist, então a próxima tentativa sai de graça. O corte de bloqueio automático é **medido**, não chutado: o vetor não separa fraude de reembolso legítimo ("não recebi meu pedido, quero o dinheiro de volta" pontua 0,8664 contra uma frase de fraude), então acima do maior score legítimo medido ele bloqueia sozinho e na faixa ambígua quem decide é o classificador — cliente nunca é barrado por vizinhança vetorial. E "qual é a temperatura hoje?" não é ataque: recebe orientação educada com **0 tokens**, sem agente e sem cache, marcada como `🧭 Guardrail de escopo`.
+**4. Tente quebrar — inclusive com pergunta aleatória.** Um jailbreak ou um prompt de falsa autoridade bate primeiro na denylist; o que for novo vai para um classificador LLM barato que escreve o padrão de volta na denylist, então a próxima tentativa sai de graça. O corte de bloqueio automático é **medido**, não chutado: o vetor não separa fraude de reembolso legítimo ("não recebi meu pedido, quero o dinheiro de volta" pontua 0,8664 contra uma frase de fraude), então acima do maior score legítimo medido ele bloqueia sozinho e na faixa ambígua quem decide é o classificador — cliente nunca é barrado por vizinhança vetorial. E "qual é a temperatura hoje?" não é ataque: recebe orientação educada com **0 tokens**, sem agente e sem cache, marcada como `🧭 Guardrail de escopo`. Quem decide o que é da loja não é uma lista de palavras: é uma busca vetorial (`scope_probes`) que entende inglês, gíria e erro de digitação, e só chama o LLM na faixa ambígua. Medido em **229 situações geradas por LLM** (com holdout): acerto **87,3% → 97,5%** no holdout, 0% de cliente legítimo bloqueado.
 
 ![Painel de guardrails: bloqueios, denylist auto-alimentada, casos ambíguos sinalizados](docs/screenshots/06-guardrails.png)
 
@@ -65,14 +65,15 @@ A demo escreve de verdade (fatos, episódios, cache do cliente). O botão **"Rei
 
 ```bash
 cd backend
-pytest -q                       # unitários (294, sem rede)
+pytest -q                       # unitários (380, sem rede)
 python tests/smoke.py <url>     # caixa-preta
 python eval.py <url>            # golden dataset, resultados em eval_runs
 
 # modo LIVE — Atlas e LLM REAIS (custa tokens; identidade descartável, limpa o que gravou)
 LIVE=1 pytest tests/test_live.py -q            # ~2 min — contratos essenciais
 LIVE=1 pytest tests/test_live_random.py -q     # ~4 min — perguntas aleatórias e fora de escopo
-LIVE=1 pytest tests/test_live_scenarios.py -q  # ~7 min — jornada completa dos 4 clientes
+LIVE=1 pytest tests/test_live_scenarios.py -q  # ~10 min — jornada completa dos 4 clientes
+python eval_situations.py                      # ~5 min — 229 situações geradas por LLM contra o agente real (dev vs holdout)
 ```
 
 `DEMO_MODE` esconde bugs que só o driver real produz — datetime sem fuso, `ObjectId` cru na timeline, documento legado sem o campo novo. Os três foram encontrados exatamente assim, em modo LIVE, depois de a suíte offline estar verde. Por isso `git push` roda `.githooks/pre-push` (ruff + testes offline + `test_live.py`); ative num clone novo com `git config core.hooksPath .githooks`.
@@ -97,4 +98,4 @@ Defina `ENVIRONMENT=production`, `AUTH_REQUIRED=1` e `DEMO_TOKEN_ISSUANCE_ENABLE
 
 ## Documentação
 
-[Arquitetura](docs/architecture.md) · [ADR-001 — coordenação orientada a documentos](docs/adr/ADR-001-arquitetura-multi-agente.md) · [ADR-002 — memória por LLM e turno pessoal fora do cache](docs/adr/ADR-002-memoria-llm-e-turno-pessoal.md) · [ADR-003 — guardrail em duas faixas e fora de escopo](docs/adr/ADR-003-guardrail-em-duas-faixas.md)
+[Arquitetura](docs/architecture.md) · [ADR-001 — coordenação orientada a documentos](docs/adr/ADR-001-arquitetura-multi-agente.md) · [ADR-002 — memória por LLM e turno pessoal fora do cache](docs/adr/ADR-002-memoria-llm-e-turno-pessoal.md) · [ADR-003 — guardrail em duas faixas e fora de escopo](docs/adr/ADR-003-guardrail-em-duas-faixas.md) · [ADR-004 — escopo por embedding e medição por situações](docs/adr/ADR-004-escopo-por-embedding-e-medicao-por-situacoes.md)

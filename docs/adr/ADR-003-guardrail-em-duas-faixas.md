@@ -3,6 +3,7 @@
 - Status: aceito
 - Data: 2026-09-20
 - Relacionado: [ADR-002](ADR-002-memoria-llm-e-turno-pessoal.md)
+- Evoluído por: [ADR-004](ADR-004-escopo-por-embedding-e-medicao-por-situacoes.md) — o vocabulário de domínio descrito aqui foi medido em 229 situações e passou a ser só fallback; o escopo agora é por embedding
 
 ## Contexto
 

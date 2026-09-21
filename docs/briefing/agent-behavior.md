@@ -50,7 +50,11 @@ Definidos como documentos em `multiagent_brain.agent_registry` (seed em `backend
 3. Só se isso também for puro fallback E a mensagem tiver algum sinal de domínio (`has_domain_signal`) o **LLM classificador** é chamado (`orchestrator` agent, prompt fechado, uma linha de resposta, chave só). **O LLM nunca sobrescreve uma decisão determinística já confiante** — decisão explícita para manter reprodutibilidade (sampling variance quebrava roteamento em mensagens quase idênticas).
 4. Sem sinal de domínio nenhum → `fora_de_escopo` (ver seção própria abaixo), resposta do orquestrador ancorada nos dados reais do cliente (nunca um "não entendi" genérico).
 
-### Pergunta aleatória / fora de escopo (ADR-003)
+### Escopo por embedding (ADR-004) — o que decide "é da loja?"
+
+Antes a decisão era uma lista de palavras (descrita logo abaixo, agora **só fallback**). Medida em 229 situações, ela escorregava: inglês/espanhol, gíria, erro de digitação, aparelhos que a loja não vende, saudação/meta. Hoje `scope_classifier.classify` faz `$vectorSearch` em `<brain>.scope_probes` e compara o melhor score de cada rótulo (`in`/`out`/`chat`); decide pela **margem** entre líder e segundo, com limiar **medido** por rótulo. `out`/`chat` decisivos resolvem com 0 tokens; `in`/`unsure` vão ao LLM de roteamento (`ROUTER_PROMPT`, que descreve os 7 agentes e tem as saídas `conversa` e `nenhum`). Só roda quando nada mais decidiu (`reaches_scope_classifier`). Sem veredito real, cai na lista de palavras abaixo.
+
+### Pergunta aleatória / fora de escopo — lista de palavras (ADR-003, fallback)
 
 A demo é aberta: o cliente digita "qual é a temperatura hoje?". O vocabulário de domínio é dividido em dois níveis:
 

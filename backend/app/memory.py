@@ -148,7 +148,7 @@ async def extract_and_store(store: DataStore, customer_key: str, message: str, *
     known_list = "\n".join(f"{i + 1}. {_text(doc)}" for i, doc in enumerate(known)) or "(nenhum)"
     try:
         raw, _ = await llm.complete(
-            agent={**agent_doc, "persona": EXTRACTOR_PERSONA, "max_output_tokens": 400},
+            agent={**agent_doc, "persona": EXTRACTOR_PERSONA, "max_output_tokens": 400, "temperature": 0},
             user_message=message,
             dynamic_context=f"Fatos JÁ CONHECIDOS sobre este cliente:\n{known_list}",
             budget=budget,

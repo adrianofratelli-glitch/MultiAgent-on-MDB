@@ -140,3 +140,53 @@ async def test_truncated_response_is_charged_without_being_accepted():
     assert budget.llm_calls[0]["status"] == "incomplete"
     assert budget.llm_calls[0]["estimated_cost_usd"] == .0002
     assert budget.total_used == 150
+
+
+async def test_empty_dynamic_context_never_sends_an_empty_system_block():
+    """A API rejeita bloco de texto vazio (BadRequestError). Contexto dinâmico vazio é legítimo: só não vira bloco."""
+    captured = {}
+
+    class FakeMessages:
+        async def create(self, **kwargs):
+            captured.update(kwargs)
+            usage = SimpleNamespace(input_tokens=1, output_tokens=1, cache_read_input_tokens=0, cache_creation_input_tokens=0)
+            return SimpleNamespace(content=[SimpleNamespace(type="text", text="ok")], stop_reason="end_turn", usage=usage)
+
+    gateway = LLMGateway(Settings(_env_file=None, anthropic_api_key="test"))
+    gateway.anthropic_client = SimpleNamespace(messages=FakeMessages())
+    gateway.client = gateway.anthropic_client
+    text, *_ = await gateway._request("claude-haiku-4-5", "persona", "", "oi", 50)
+    assert text == "ok"
+    assert [block["text"] for block in captured["system"]] == ["persona"]
+    await gateway._request("claude-haiku-4-5", "persona", "contexto", "oi", 50)
+    assert [block["text"] for block in captured["system"]] == ["persona", "contexto"]
+
+
+async def test_temperature_is_sent_only_when_requested_and_dropped_for_models_that_reject_it():
+    """Classificação precisa ser determinística (temperature 0). Nem todo modelo aceita o parâmetro: nesse caso repete sem ele."""
+    import anthropic
+
+    calls = []
+
+    class FakeMessages:
+        def __init__(self, reject):
+            self.reject = reject
+
+        async def create(self, **kwargs):
+            calls.append(dict(kwargs))
+            if self.reject and "temperature" in kwargs:
+                response = SimpleNamespace(status_code=400, request=SimpleNamespace(), headers={}, text="temperature is deprecated")
+                raise anthropic.BadRequestError("`temperature` is deprecated for this model", response=response, body=None)
+            usage = SimpleNamespace(input_tokens=1, output_tokens=1, cache_read_input_tokens=0, cache_creation_input_tokens=0)
+            return SimpleNamespace(content=[SimpleNamespace(type="text", text="ok")], stop_reason="end_turn", usage=usage)
+
+    gateway = LLMGateway(Settings(_env_file=None, anthropic_api_key="test"))
+    gateway.anthropic_client = SimpleNamespace(messages=FakeMessages(reject=False))
+    gateway.client = gateway.anthropic_client
+    await gateway._request("claude-haiku-4-5", "p", "c", "oi", 50)
+    assert "temperature" not in calls[-1]                       # padrão: não manda
+    await gateway._request("claude-haiku-4-5", "p", "c", "oi", 50, temperature=0)
+    assert calls[-1]["temperature"] == 0
+    gateway.anthropic_client = SimpleNamespace(messages=FakeMessages(reject=True))
+    text, *_ = await gateway._request("claude-haiku-4-5", "p", "c", "oi", 50, temperature=0)
+    assert text == "ok" and "temperature" not in calls[-1]      # modelo rejeitou: repete sem o parâmetro

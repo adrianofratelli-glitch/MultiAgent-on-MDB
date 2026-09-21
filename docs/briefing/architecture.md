@@ -31,6 +31,8 @@ PoV de atendimento ao cliente multiagente onde o **MongoDB Atlas é tanto o data
 | `backend/app/graph.py` | `$graphLookup` sobre `orders` — cadeia de reposição/troca |
 | `backend/app/cascade.py` | Cascata de cache semântico (curto prazo → cache global) via `$vectorSearch`/`$unionWith` |
 | `backend/app/memory.py` | Extrator LLM de fatos do cliente + dedup, supersessão e `looks_like_instruction` (`customer_memory`) |
+| `backend/app/scope_classifier.py` | Classificador de escopo por embedding (`in`/`out`/`chat`, margem, faixa ambígua → LLM) — ADR-004 |
+| `backend/eval_situations.py` / `generate_situations.py` | Mede o agente real em 229 situações geradas por LLM (dev vs holdout); `tests/data/situations.json` |
 | `backend/app/turn_classifier.py` | Classificador vetorial "este turno depende da memória deste cliente?" (`<brain>.turn_probes`) |
 | `backend/app/warmup.py` | Aquecimento automático do cache semântico (no start e quando a UI abre) |
 | `backend/app/demo_reset.py` | Desfaz o que a demo gravou num cliente e reativa o que ela substituiu |
@@ -44,7 +46,7 @@ PoV de atendimento ao cliente multiagente onde o **MongoDB Atlas é tanto o data
 
 1. **Entrada** — `POST /api/chat`, JWT decodifica `customer_key` (nunca vem do payload).
 2. **Guardrail de entrada** — denylist estático → denylist vetorial (Atlas Vector Search) → LLM classificador (só se necessário).
-3. **Escopo** — sem sinal de domínio, o turno termina numa orientação determinística: sem agente, sem LLM, **0 tokens**, marcado como `out_of_scope` na timeline (ADR-003).
+3. **Escopo** — embedding decide `in`/`out`/`chat` (ADR-004); `out` decisivo termina numa orientação determinística: sem agente, sem LLM, **0 tokens**, marcado como `out_of_scope` na timeline; a faixa ambígua vai ao LLM de roteamento. Sem veredito real, vale a lista de palavras (ADR-003).
 4. **Extração de memória** — fatos em 3ª pessoa extraídos por LLM (com `max_price_brl` estruturado para orçamento), deduplicados e gravados com supersessão transacional em `customer_memory`; falha fechada, nunca derruba o turno (ADR-002).
 5. **Roteamento** — regra determinística por keyword (`cheap_route`) prioritária; LLM só decide quando não há sinal de regra nenhum. Fan-out paralelo (`order_agent` + `billing_agent`) para perguntas compostas genuinamente independentes.
 6. **Cascata de cache semântico** — `$vectorSearch` em `short_term_memory` unido (`$unionWith`) com `semantic_cache`; HIT retorna sem chamar LLM nenhum — mas turno pessoal não lê nem grava esse cache (ADR-002).

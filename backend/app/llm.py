@@ -92,7 +92,7 @@ class LLMGateway:
             True if settings.grove_api_key and settings.grove_chat_completions_url
             and not settings.demo_mode else None)
 
-    async def _request(self, model, system_static, dynamic_context, message, max_tokens):
+    async def _request(self, model, system_static, dynamic_context, message, max_tokens, temperature=None):
         if model in self.settings.grove_openai_models:
             import httpx
             if not self.settings.grove_api_key:
@@ -119,12 +119,22 @@ class LLMGateway:
             return choice["message"]["content"], counts, known
         if not self.anthropic_client:
             raise RuntimeError("Anthropic route is not configured")
-        response = await self.anthropic_client.messages.create(
+        params = dict(
             model=model, max_tokens=max_tokens,
             system=[{"type": "text", "text": system_static, "cache_control": {"type": "ephemeral"}},
-                    {"type": "text", "text": dynamic_context}],
+                    *([{"type": "text", "text": dynamic_context}] if dynamic_context.strip() else [])],
             messages=[{"role": "user", "content": message}],
         )
+        if temperature is not None:
+            # classificação (segurança, roteamento) precisa ser determinística: temperature 0
+            params["temperature"] = temperature
+        try:
+            response = await self.anthropic_client.messages.create(**params)
+        except anthropic.BadRequestError as exc:
+            if temperature is None or "temperature" not in str(exc).lower():
+                raise
+            params.pop("temperature")  # nem todo modelo aceita o parâmetro: repete sem ele em vez de falhar o turno
+            response = await self.anthropic_client.messages.create(**params)
         usage = response.usage
         counts = {"input_tokens": int(usage.input_tokens), "output_tokens": int(usage.output_tokens),
                   "cache_read_tokens": int(getattr(usage, "cache_read_input_tokens", 0) or 0),
@@ -175,7 +185,8 @@ class LLMGateway:
                 try:
                     text, counts, known = await self._request(
                         model, system_static, dynamic_context, user_message,
-                        min(agent.get("max_output_tokens") or agent["max_turn_tokens"], remaining - estimated))
+                        min(agent.get("max_output_tokens") or agent["max_turn_tokens"], remaining - estimated),
+                        agent.get("temperature"))
                     record.update(counts, usage_known=known, status="ok" if text else "incomplete")
                     # Incomplete responses still carry billable usage.
                     record["estimated_cost_usd"] = call_cost({**record, "status": "ok"}, self.settings.llm_prices, self.settings.llm_blended_prices)

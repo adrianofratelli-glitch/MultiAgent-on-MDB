@@ -47,7 +47,7 @@ def test_turn_test_probes_have_both_labels_and_generic_ones_avoid_the_phrase_gat
 
 def test_default_targets_are_all_and_only_narrows():
     parser = cal.build_parser()
-    assert cal.selected_targets(parser.parse_args([])) == {"denylist", "turn", "block"}
+    assert cal.selected_targets(parser.parse_args([])) == {"denylist", "turn", "block", "scope"}
     args = parser.parse_args(["--only", "turn", "--allow-errors", "--apply"])
     assert cal.selected_targets(args) == {"turn"} and args.allow_errors and args.apply
 
@@ -114,3 +114,16 @@ def test_legit_probes_are_all_distinct_and_nonempty_and_cover_refund_and_data_re
 
 def test_block_target_is_selectable():
     assert cal.selected_targets(cal.build_parser().parse_args(["--only", "block"])) == {"block"}
+
+
+def test_scope_thresholds_sit_above_the_worst_measured_mistake_per_label():
+    from app import scope_classifier as sc
+    items = [("in", {"in": .80, "out": .60, "chat": .30}), ("in", {"in": .70, "out": .60, "chat": .30}),
+             ("out", {"in": .60, "out": .78, "chat": .30}), ("out", {"in": .64, "out": .70, "chat": .30}),
+             ("chat", {"in": .40, "out": .50, "chat": .80}), ("out", {"in": .72, "out": .70, "chat": .30})]  # um "out" que parece "in"
+    thresholds, stats = cal.scope_thresholds_from(items)
+    assert set(thresholds) == set(sc.LABELS)
+    assert stats["in"]["worst_wrong_margin"] == pytest.approx(0.02, abs=1e-4)   # o "out" que parecia "in" por +0,02
+    assert thresholds["in"] == pytest.approx(max(0.02 + cal.SCOPE_SLACK, cal.SCOPE_FLOOR), abs=1e-4)  # pior erro + folga, nunca abaixo do piso
+    assert stats["in"]["decisive"] == 2 and stats["in"]["n"] == 2                 # margens 0,20 e 0,10 passam
+    assert thresholds["chat"] >= cal.SCOPE_FLOOR

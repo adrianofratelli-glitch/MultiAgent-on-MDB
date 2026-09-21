@@ -31,10 +31,13 @@ Rode sempre que trocar o modelo de embedding, o cluster ou as frases seedadas.
 
 import argparse
 import asyncio
+import json
 import sys
+from pathlib import Path
 from typing import Callable
 
-from app import turn_classifier
+from app import scope_classifier, turn_classifier
+from app.orchestration import reaches_scope_classifier
 from app.config import get_settings
 from app.database import DataStore, utcnow
 
@@ -104,7 +107,36 @@ LEGIT_CS_PROBES = [
 ]
 BLOCK_MARGIN = 0.015
 
-TARGETS = ("denylist", "turn", "block")
+TARGETS = ("denylist", "turn", "block", "scope")
+
+
+# Rótulo verdadeiro (por construção) de cada categoria do conjunto de situações, para medir o classificador de escopo. Ataques e
+# FRONTEIRAS (produto que a loja não vende, ajuda técnica genérica) ficam de fora: não têm resposta única. Só o split `dev` mede.
+SCOPE_LABEL_OF = {**{c: "out" for c in ("out_time_weather", "out_trivia", "out_homework_math", "out_entertainment", "out_store_info", "weird_noise")},
+                  **{c: "chat" for c in ("welcome_greeting", "welcome_thanks", "welcome_meta")}}
+SCOPE_IN_CATEGORIES = ("order_status", "order_exchange", "refund_legit", "order_cancel", "invoice", "charge_dispute", "product_reco",
+                       "product_price", "tech_defect", "human_ticket", "warranty", "loyalty", "delivery", "own_data", "multilingual", "mixed")
+SCOPE_FLOOR = 0.04  # piso prudente: o dev tem poucos itens "in" sem palavra-chave; margem menor que isso é ruído
+SCOPE_SLACK = 0.005
+
+
+def scope_thresholds_from(items: list[tuple[str, dict[str, float]]]) -> tuple[dict[str, float], dict[str, dict]]:
+    """(rótulo verdadeiro, melhor score por rótulo) -> limiar de cada rótulo, "precisão primeiro".
+
+    Um rótulo só é decisivo com margem acima da MAIOR margem que ele teve num item que NÃO era dele (+ folga): nenhum erro medido
+    vira decisão. Devolve também a cobertura (quantos dos itens dele passam) — o que sobra vai para o LLM."""
+    def margin(best: dict[str, float], label: str) -> float:
+        return best[label] - max(v for k, v in best.items() if k != label)
+
+    thresholds, stats = {}, {}
+    for label in scope_classifier.LABELS:
+        wrong = [margin(best, label) for true, best in items if true != label]
+        mine = [margin(best, label) for true, best in items if true == label]
+        threshold = round(max(max(wrong, default=0.0) + SCOPE_SLACK, SCOPE_FLOOR), 4)
+        thresholds[label] = threshold
+        stats[label] = {"threshold": threshold, "n": len(mine), "decisive": sum(m >= threshold for m in mine),
+                        "worst_wrong_margin": round(max(wrong, default=0.0), 4)}
+    return thresholds, stats
 
 
 def block_threshold_from(legit_scores: list[float], margin: float = BLOCK_MARGIN) -> float:
@@ -253,6 +285,25 @@ async def main() -> None:
             block_threshold = block_threshold_from(scores)
             print(f"  maior score legítimo: {max(scores):.4f} · corte de bloqueio direto: {block_threshold}")
 
+        scope_thresholds = None
+        if "scope" in wanted:
+            print("\n=== Classificador de escopo (situações do split DEV; o índice nunca viu essas frases) ===")
+            situations = json.loads((Path(__file__).parent / "tests" / "data" / "situations.json").read_text(encoding="utf-8"))
+            items = []
+            for case in situations:
+                if case["split"] != "dev":
+                    continue
+                true = SCOPE_LABEL_OF.get(case["category"]) or ("in" if case["category"] in SCOPE_IN_CATEGORIES else None)
+                if true is None or not reaches_scope_classifier(case["message"]):
+                    continue  # em produção só chega ao classificador o que nenhuma palavra/regra decidiu: meça essa população
+                best = await scope_classifier.best_scores(store, case["message"])
+                if best is None:
+                    raise SystemExit("índice scope_probes_vs indisponível/vazio — rode seed_scope_probes.py e espere ficar READY")
+                items.append((true, best))
+            scope_thresholds, stats = scope_thresholds_from(items)
+            for label, st in stats.items():
+                print(f"  {label:<5} limiar={st['threshold']}  pior erro medido={st['worst_wrong_margin']}  decisivos {st['decisive']}/{st['n']} dos itens dele (o resto vai para o LLM)")
+
         turn_threshold = None
         if "turn" in wanted:
             turn_threshold = await calibrate(
@@ -266,6 +317,13 @@ async def main() -> None:
             return
 
         now = utcnow()
+        if scope_thresholds is not None:
+            await store.update_one(scope_classifier.CONFIG_COLLECTION, {"active": True},
+                                   {"$set": {**{f"{k}_margin": v for k, v in scope_thresholds.items()}, "updated_at": now,
+                                             "calibration": {"measured_at": now.strftime("%Y-%m-%d"), "split": "dev",
+                                                             "method": "backend/calibrate_thresholds.py --only scope"}}},
+                                   upsert=True, brain=True)
+            print(f"✓ scope_classifier_config ← {scope_thresholds}")
         if block_threshold is not None:
             for policy in await store.find_many("guardrail_policies", {"active": True}, limit=50, brain=True):
                 await store.update_one("guardrail_policies", {"area": policy.get("area", "default")},

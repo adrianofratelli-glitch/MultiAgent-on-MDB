@@ -2,7 +2,7 @@
 
 - Status: aceito
 - Data: 2026-07-15
-- Complementado por: [ADR-002](ADR-002-memoria-llm-e-turno-pessoal.md) (memória extraída por LLM, turno pessoal fora do cache) e [ADR-003](ADR-003-guardrail-em-duas-faixas.md) (guardrail em duas faixas, pergunta fora de escopo)
+- Complementado por: [ADR-002](ADR-002-memoria-llm-e-turno-pessoal.md) (memória extraída por LLM, turno pessoal fora do cache) e [ADR-003](ADR-003-guardrail-em-duas-faixas.md) (guardrail em duas faixas, pergunta fora de escopo); [ADR-004](ADR-004-escopo-por-embedding-e-medicao-por-situacoes.md) (escopo por embedding, medição por situações)
 
 ## Contexto
 

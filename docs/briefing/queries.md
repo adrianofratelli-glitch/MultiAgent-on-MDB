@@ -270,6 +270,7 @@ Referenciados por nome nas pipelines acima — não são criados por `create_sta
 | `long_term_autoembed_v1` | Vector Search (Automated Embedding) | `long_term_memory` | `text` | `cascade.py` |
 | `products_autoembed_v1` | Vector Search (Automated Embedding) | `products_catalog` | `search_text` | `agents.py:search_products` |
 | `denylist_autoembed_v1` | Vector Search (Automated Embedding) | `guardrail_denylist` | `phrase` | `guardrails.py` |
+| `scope_probes_vs` | Vector Search (Automated Embedding) | `<brain>.scope_probes` | `phrase` | `scope_classifier.py` — rótulos `in`/`out`/`chat`; criado por `seed_scope_probes.py`, fora do `seed.py` |
 | `turn_probes_vs` | Vector Search (Automated Embedding) | `<brain>.turn_probes` | `phrase` | `turn_classifier.py` — criado por `seed_turn_probes.py`, fora do `seed.py` |
 | `kb_autoembed_v1` | Vector Search (Automated Embedding) | `kb_articles` | `content` | `retrieval.py` |
 | `kb_lexical_v1` | Atlas Search (BM25, analyzer português) | `kb_articles` | `title`, `content` | `retrieval.py` |
