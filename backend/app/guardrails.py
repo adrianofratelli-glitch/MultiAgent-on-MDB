@@ -26,6 +26,12 @@ DENYLIST_INDEX = "denylist_autoembed_v1"
 DENYLIST_PATH = "phrase"
 # Score logo abaixo do threshold vira candidato a revisão, não bloqueio.
 VECTOR_NEAR_MISS_MARGIN = 0.04
+# O vetor NÃO separa fraude de pedido legítimo de reembolso ("não recebi meu pedido, quero o dinheiro de volta" pontua
+# 0,87 contra "posso alegar que não recebi..."), e vários ataques pontuam ABAIXO de qualquer corte. Por isso o vetor só
+# bloqueia direto acima do maior score legítimo medido (`vector_block_threshold`, calibrate_thresholds.py); entre
+# `vector_threshold` e esse valor a mensagem é AMBÍGUA e quem decide é o classificador LLM. Sem valor medido na
+# política, só quase-cópia da frase proibida bloqueia sozinha.
+DEFAULT_VECTOR_BLOCK_THRESHOLD = 0.92
 
 
 async def semantic_denylist(store: DataStore, message: str, area: str) -> tuple[dict | None, bool]:
@@ -91,16 +97,20 @@ async def check_input(store: DataStore, message: str, customer: dict, llm=None, 
     # de substring acima nunca alcança, antes e sem o custo do classificador LLM — e continua
     # valendo quando `skip_semantic` desliga o classificador.
     vector_match, vector_available = await semantic_denylist(store, message, customer["area"])
+    ambiguous = False
     if vector_match:
         vector_threshold = float(policy.get("vector_threshold", 0.74))
-        if vector_match["score"] >= vector_threshold:
+        block_threshold = float(policy.get("vector_block_threshold", DEFAULT_VECTOR_BLOCK_THRESHOLD))
+        if vector_match["score"] >= vector_threshold and vector_match["score"] < block_threshold:
+            ambiguous = True  # vizinho de frase proibida, mas dentro da faixa em que há pedido legítimo: não bloqueia sozinho
+        elif vector_match["score"] >= block_threshold:
             result = GuardrailResult(
                 True, f"denylist_vetorial ({vector_match['category']})",
                 vector_match["phrase"], vector_match["score"],
             )
             await log_event(store, customer, message, result)
             return result
-        if vector_match["score"] >= vector_threshold - VECTOR_NEAR_MISS_MARGIN:
+        if not ambiguous and vector_match["score"] >= vector_threshold - VECTOR_NEAR_MISS_MARGIN:
             # near-miss: não bloqueia, mas entra na fila de revisão humana — mesma política
             # anti-envenenamento do resto do fluxo (promoção nunca é automática).
             await store.insert_one(
@@ -137,13 +147,32 @@ async def check_input(store: DataStore, message: str, customer: dict, llm=None, 
     # Pulado quando skip_semantic=True (mensagem já bateu numa regra de roteamento conhecida e segura — ex.
     # "onde está meu pedido PED-1001?" — jailbreak/engenharia social não se parece com isso; economiza 1
     # chamada de LLM por turno na maioria das mensagens do dia a dia, sem abrir mão de checar o que é ambíguo).
-    if not skip_semantic and llm is not None and getattr(llm, "client", None) and agent_doc is not None:
-        verdict, _ = await llm.complete(
-            agent={**agent_doc, "persona": GUARDRAIL_CLASSIFIER_PERSONA, "max_output_tokens": 40},
-            user_message=message,
-            dynamic_context="Classifique a mensagem acima.",
-            budget=budget,
+    can_classify = llm is not None and getattr(llm, "client", None) and agent_doc is not None
+    if ambiguous and not can_classify:
+        # sem classificador não há como decidir: nunca bloquear um cliente por vizinhança vetorial; fila de revisão humana
+        await store.insert_one(
+            "guardrail_candidates",
+            {"customer_key": customer["customer_key"], "area": customer["area"], "text": message,
+             "near_phrase": vector_match["phrase"], "score": vector_match["score"],
+             "status": "pending", "source": "denylist_vetorial_ambigua", "created_at": utcnow()},
         )
+    if (not skip_semantic or ambiguous) and can_classify:
+        try:
+            verdict, _ = await llm.complete(
+                agent={**agent_doc, "persona": GUARDRAIL_CLASSIFIER_PERSONA, "max_output_tokens": 40},
+                user_message=message,
+                dynamic_context="Classifique a mensagem acima.",
+                budget=budget,
+            )
+        except Exception:  # noqa: BLE001 — classificador fora do ar não derruba nem bloqueia o turno
+            verdict = None
+            if ambiguous:
+                await store.insert_one(
+                    "guardrail_candidates",
+                    {"customer_key": customer["customer_key"], "area": customer["area"], "text": message,
+                     "near_phrase": vector_match["phrase"], "score": vector_match["score"],
+                     "status": "pending", "source": "denylist_vetorial_ambigua", "created_at": utcnow()},
+                )
         verdict_upper = (verdict or "").strip().upper()
         if verdict_upper.startswith("BLOQUEAR"):
             reason = verdict.split(":", 1)[1].strip() if ":" in verdict else "classificado pelo modelo"

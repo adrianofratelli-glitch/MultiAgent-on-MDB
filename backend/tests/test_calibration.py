@@ -47,7 +47,7 @@ def test_turn_test_probes_have_both_labels_and_generic_ones_avoid_the_phrase_gat
 
 def test_default_targets_are_all_and_only_narrows():
     parser = cal.build_parser()
-    assert cal.selected_targets(parser.parse_args([])) == {"denylist", "turn"}
+    assert cal.selected_targets(parser.parse_args([])) == {"denylist", "turn", "block"}
     args = parser.parse_args(["--only", "turn", "--allow-errors", "--apply"])
     assert cal.selected_targets(args) == {"turn"} and args.allow_errors and args.apply
 
@@ -100,3 +100,17 @@ async def test_apply_turn_threshold_upserts_the_single_active_config():
     assert len(docs) == 1 and docs[0]["threshold"] == .73
     assert docs[0]["calibration"]["method"] == "backend/calibrate_thresholds.py"
     assert await tc._threshold(store) == .73
+
+
+def test_block_threshold_sits_just_above_the_highest_legit_score():
+    assert cal.block_threshold_from([0.70, 0.8664, 0.75]) == pytest.approx(0.8814)
+
+
+def test_legit_probes_are_all_distinct_and_nonempty_and_cover_refund_and_data_requests():
+    assert len(cal.LEGIT_CS_PROBES) == len(set(cal.LEGIT_CS_PROBES)) and len(cal.LEGIT_CS_PROBES) >= 30
+    joined = " ".join(cal.LEGIT_CS_PROBES)
+    assert "dinheiro de volta" in joined and "dados do meu pedido" in joined
+
+
+def test_block_target_is_selectable():
+    assert cal.selected_targets(cal.build_parser().parse_args(["--only", "block"])) == {"block"}

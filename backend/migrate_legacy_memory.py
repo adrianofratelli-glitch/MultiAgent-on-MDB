@@ -1,9 +1,10 @@
 """Migra documentos legados de `customer_memory` (fact_type/value) para o formato do extrator (fact/...).
 
 Aditivo e idempotente: só ACRESCENTA campos (`fact`, `fact_norm`, `category`, `superseded_by`,
-`migrated_from`) e nunca remove `fact_type`/`value`, então dá para reverter. `price_sensitive` ganha
-`max_price_brl = 350`: era exatamente o teto fixo que o product_agent antigo aplicava, então o
-comportamento do cliente não muda — só passa a ser o campo estruturado que o servidor filtra.
+`migrated_from`) e nunca remove `fact_type`/`value`, então dá para reverter. `price_sensitive` NÃO
+ganha `max_price_brl`: uma versão anterior aplicava o teto fixo de R$ 350 que o código antigo usava, mas isso
+bloqueava o cache de produto e impunha um limite que o cliente nunca declarou. Orçamento agora só existe
+quando o cliente diz um número (extrator) — `clear_legacy_price_cap` desfaz a versão anterior.
 
     python migrate_legacy_memory.py           # dry-run: só conta
     python migrate_legacy_memory.py --apply   # grava
@@ -16,7 +17,6 @@ from app.config import get_settings
 from app.database import DataStore, utcnow
 from app.memory import _fact_norm
 
-LEGACY_PRICE_CAP_BRL = 350.0
 CATEGORY_BY_TYPE = {"price_sensitive": "preferencia", "product_complaint": "historico"}
 
 
@@ -30,10 +30,16 @@ async def migrate(store: DataStore, *, apply: bool) -> int:
         update = {"fact": doc["value"], "fact_norm": _fact_norm(doc["value"]),
                   "category": CATEGORY_BY_TYPE.get(doc.get("fact_type"), "contexto"),
                   "superseded_by": None, "migrated_from": doc.get("fact_type"), "updated_at": utcnow()}
-        if doc.get("fact_type") == "price_sensitive" and doc.get("active"):  # histórico inativo não ganha teto
-            update["max_price_brl"] = LEGACY_PRICE_CAP_BRL
         await store.update_one("customer_memory", {"_id": doc["_id"]}, {"$set": update})
     return len(legacy)
+
+
+async def clear_legacy_price_cap(store: DataStore) -> int:
+    """Remove o teto de R$ 350 que a migração anterior pôs nos fatos price_sensitive (o fato em si permanece)."""
+    docs = await store.find_many("customer_memory", {"migrated_from": "price_sensitive", "max_price_brl": {"$gt": 0}}, limit=10_000)
+    for doc in docs:
+        await store.update_one("customer_memory", {"_id": doc["_id"]}, {"$unset": {"max_price_brl": ""}, "$set": {"updated_at": utcnow()}})
+    return len(docs)
 
 
 async def main() -> None:
@@ -43,6 +49,8 @@ async def main() -> None:
     try:
         if store.memory:
             sys.exit("DEMO_MODE/sem MONGODB_URI: nada a migrar.")
+        if apply:
+            print(f"teto legado removido de {await clear_legacy_price_cap(store)} documento(s)")
         count = await migrate(store, apply=apply)
         print(f"{'migrados' if apply else 'seriam migrados (dry-run)'}: {count} documento(s)")
     finally:

@@ -105,23 +105,52 @@ DOMAIN_VOCAB = (
     "pedido", "ped-", "compra", "comprei", "comprar", "encomenda", "entrega", "entregue",
     "enviar", "envio", "enviado", "rastreio", "rastreamento", "transportadora", "frete",
     "chegou", "chegar", "atraso", "atrasado", "prazo", "endereco", "reagendar",
-    "fatura", "fat-", "cobranca", "cobrado", "boleto", "pagamento", "pagar", "pago",
-    "valor", "preco", "barato", "barata", "caro", "desconto", "vencimento", "parcela",
-    "produto", "catalogo", "modelo", "marca", "recomenda", "recomendacao", "sugestao",
-    "parecido", "parecida", "similar", "opcao", "opcoes", "estoque", "disponivel",
-    "troca", "trocar", "devolucao", "devolver", "reembolso", "estornar", "estorno",
+    "fatura", "fat-", "cobranca", "cobrado", "boleto", "pagamento", "pagar", "cartao",
+    "preco", "barato", "barata", "desconto", "vencimento", "parcela", "dinheiro",
+    "produto", "catalogo", "recomenda", "recomendacao", "sugestao",
+    "parecido", "parecida", "similar", "estoque", "disponivel",
+    "troca", "trocar", "devolucao", "devolver", "devolv", "reembolso", "estornar", "estorno",
     "cancelar", "cancelamento", "garantia", "garantido", "defeito", "quebrado",
-    "problema", "suporte", "ajuda", "conserto", "assistencia", "nao funciona",
+    "suporte", "conserto", "assistencia", "nao funciona",
     "nao liga", "nao conecta", "atendente", "chamado", "escalar", "reclamacao",
-    "pontos", "fidelidade", "resgatar", "resgate", "milhas", "tier", "beneficio",
-    "conta", "cadastro", "nota fiscal", "recibo",
+    "pontos", "fidelidade", "resgatar", "resgate", "milhas", "beneficio",
+    "nota fiscal", "recibo", "encomendei", "minha loja", "custa", "quanto custa",
 )
+# Palavras genéricas demais para provar sozinhas que a mensagem é da loja ("me CONTA uma piada", "me AJUDA com meu
+# dever", "qual a MARCA do carro"). Sozinhas NÃO liberam o palpite genérico: só o classificador (LLM) pode decidir; sem
+# ele a resposta é a orientação de escopo. Casadas por palavra inteira, não por pedaço ("conta" não casa "contar").
+WEAK_VOCAB = ("ajuda", "conta", "problema", "valor", "modelo", "marca", "opcao", "opcoes", "cadastro",
+              "caro", "pago", "tier", "loja")
+
+
+def _padded(message: str) -> str:
+    """Texto sem acento e sem pontuação, com espaço nas bordas: permite casar palavra inteira sem regex."""
+    from .memory import fold
+    return fold(message)
 
 
 def has_domain_signal(message: str) -> bool:
-    """True quando a mensagem tem algum vínculo com o atendimento desta loja."""
+    """True quando a mensagem tem sinal FORTE de que fala com esta loja."""
     text = normalize(message)
     return any(term in text for term in DOMAIN_VOCAB)
+
+
+def has_weak_signal(message: str) -> bool:
+    """Só palavras genéricas (ajuda, conta, valor...) — inconclusivo sem o classificador."""
+    padded = _padded(message)
+    return any(f" {term} " in padded for term in WEAK_VOCAB)
+
+
+def out_of_scope_sentences(message: str) -> list[str]:
+    """Numa mensagem MISTA (várias frases, ao menos uma da loja), as frases sem nenhum sinal de domínio.
+
+    Só fatia em pontuação de frase (? ; . !) — nunca em "e"/"depois": "quero trocar o fone e receber o dinheiro" é
+    uma frase só. Mensagem toda fora do escopo (nenhuma frase da loja) devolve [] (é outro caminho)."""
+    sentences = [part.strip() for part in message.replace("?", "\n").replace(";", "\n").replace(".", "\n").replace("!", "\n").splitlines()]
+    sentences = [part for part in sentences if len(part.split()) >= 3]
+    if len(sentences) < 2 or not any(has_domain_signal(part) for part in sentences):
+        return []
+    return [part for part in sentences if not has_domain_signal(part) and not has_weak_signal(part)][:2]
 
 
 def deterministic_orchestrator(message: str) -> RouteDecision:

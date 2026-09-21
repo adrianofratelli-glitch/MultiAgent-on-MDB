@@ -315,6 +315,8 @@ class DataStore:
                     target.setdefault(key, copy.deepcopy(value))
             for key, value in update.get("$set", {}).items():
                 target[key] = copy.deepcopy(value)
+            for key in update.get("$unset", {}):
+                target.pop(key, None)
             for key, value in update.get("$inc", {}).items():
                 target[key] = target.get(key, 0) + value
             for key, value in update.get("$push", {}).items():

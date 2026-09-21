@@ -202,15 +202,29 @@ GREETINGS = ("oi", "ola", "olá", "bom dia", "boa tarde", "boa noite", "e ai", "
              "hey", "hello", "tudo bem", "opa", "alo", "alô", "menu", "ajuda", "help")
 
 
+def _words(message: str) -> str:
+    """Minúsculas, sem acento, pontuação virando espaço: "Bom dia, tudo bem?" → "bom dia tudo bem"."""
+    folded = "".join(char for char in unicodedata.normalize("NFKD", message.lower()) if not unicodedata.combining(char))
+    return " ".join("".join(c if c.isalnum() else " " for c in folded).split())
+
+
 def is_greeting(message: str) -> bool:
     """Cumprimento/abertura de conversa — curto e sem pedido embutido."""
-    text = "".join(
-        char for char in unicodedata.normalize("NFKD", message.lower())
-        if not unicodedata.combining(char)
-    ).strip(" .!?,")
+    text = _words(message)
     if len(text.split()) > 4:
         return False
-    return any(text == term or text.startswith(term + " ") for term in GREETINGS)
+    return any(text == _words(term) or text.startswith(_words(term) + " ") for term in GREETINGS)
+
+
+CAPABILITY_QUESTIONS = ("o que voce sabe fazer", "o que voce faz", "o que voce pode fazer", "como voce pode me ajudar",
+                        "no que voce pode me ajudar", "como pode me ajudar", "com o que voce ajuda", "quais sao suas funcoes",
+                        "o que posso perguntar", "o que posso pedir", "para que voce serve")
+
+
+def is_capabilities_question(message: str) -> bool:
+    """"O que você faz?" é pergunta sobre o atendimento, não assunto alheio: responde com o que existe."""
+    text = _words(message)
+    return any(term in text for term in CAPABILITY_QUESTIONS)
 
 
 def greeting_reply(snapshot: dict, *, customer: dict) -> str:

@@ -43,6 +43,8 @@ async def live():
     await store.connect()
     assert not store.memory, "LIVE exige Atlas real, não o armazenamento em memória"
     llm = LLMGateway(settings)
+    from datetime import datetime, timezone
+    started = datetime.now(timezone.utc)
     key = f"livetest-{uuid.uuid4().hex[:10]}"
     customer = {"customer_key": key, "area": "varejo", "name": "Teste Live", "plan": "essencial"}
     unique_messages: list[str] = []
@@ -51,6 +53,8 @@ async def live():
     for name in await db.list_collection_names():
         await db[name].delete_many({"customer_key": key})
     await db["semantic_cache"].delete_many({"question_text": {"$in": unique_messages}})
+    # os testes hostis fazem o classificador APRENDER frases na denylist real; isso não pode sobreviver ao teste
+    await db["guardrail_denylist"].delete_many({"source": "semantic_llm", "learned_at": {"$gte": started}})
     await store.close()
 
 

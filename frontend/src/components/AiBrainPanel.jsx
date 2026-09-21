@@ -25,13 +25,18 @@ export function AiBrainHighlights({ customer, lastRun, timeline }) {
   const factsEvent = (timeline || []).find((event) => event.collection === 'customer_memory');
   const memDetail = `Longo prazo: ${longTermEvent ? `${longTermEvent.result?.count ?? 0} item(ns) recuperado(s) de long_term_memory` : 'nenhum item recuperado'}. Fatos do cliente: ${factsEvent ? 'novo fato extraído e persistido em customer_memory (supersessão)' : 'sem fato novo neste turno'}.`;
 
-  const guardEvent = (timeline || []).find((event) => event.category === 'guardrail');
+  const scopeEvent = (timeline || []).find((event) => event.category === 'guardrail' && event.result?.out_of_scope);
+  const guardEvent = (timeline || []).find((event) => event.category === 'guardrail' && !event.result?.out_of_scope);
   const guardBlocked = guardEvent?.result?.blocked;
-  const guardClass = guardBlocked ? 'blocked' : 'ok';
-  const guardTitle = guardBlocked ? '🛡️ Guardrail · BLOQUEADO' : '🛡️ Guardrail de entrada · aprovado';
-  const guardDetail = guardBlocked
-    ? 'Turno interrompido antes de tocar qualquer agente ou LLM.'
-    : `score ${guardEvent?.result?.score ?? '—'} · guardrail_denylist, isolado por área (${customer?.area ?? '—'})`;
+  const guardClass = scopeEvent ? 'scope' : (guardBlocked ? 'blocked' : 'ok');
+  const guardTitle = scopeEvent
+    ? '🧭 Guardrail de escopo · fora do domínio'
+    : (guardBlocked ? '🛡️ Guardrail · BLOQUEADO' : '🛡️ Guardrail de entrada · aprovado');
+  const guardDetail = scopeEvent
+    ? 'Pergunta fora do que a loja atende: orientada com educação, sem chamar agente nem LLM e sem tratar como ataque.'
+    : (guardBlocked
+      ? 'Turno interrompido antes de tocar qualquer agente ou LLM.'
+      : `score ${guardEvent?.result?.score ?? '—'} · guardrail_denylist, isolado por área (${customer?.area ?? '—'})`);
 
   return (
     <div className="ai-brain-highlights">
