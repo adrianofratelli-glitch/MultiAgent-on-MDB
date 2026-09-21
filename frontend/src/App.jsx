@@ -343,6 +343,18 @@ export default function App() {
     setGuardrails([]); setMetrics({});
   };
 
+  const resetDemoMemory = async () => {
+    if (operationRef.current || !customer) return;
+    operationRef.current = true; setBusy(true); setError('');
+    try {
+      await api.demoReset();
+      setMemory(await api.memory(customer.customer_key));
+      operationRef.current = false;
+      newConversation();
+    } catch (err) { setError(err.message); }
+    finally { operationRef.current = false; setBusy(false); }
+  };
+
   const send = async (override) => {
     const raw = typeof override === 'string' ? override : input;
     if (!raw.trim() || operationRef.current || !customer) return;
@@ -393,6 +405,7 @@ export default function App() {
                 {lastRun?.langfuse_trace_url && <a href={lastRun.langfuse_trace_url} target="_blank" rel="noreferrer">Abrir trace no Langfuse ↗</a>}
               </div></details>
               <button className="new-conversation-btn" onClick={newConversation} disabled={busy}>Nova conversa</button>
+              <button className="new-conversation-btn" onClick={resetDemoMemory} disabled={busy} title="Desfaz o que a demo gravou neste cliente (fatos, episódios, curto prazo, cache do cliente)">Reiniciar memória da demo</button>
             </div>
           </header>
           <MongoCacheSavings run={lastRun} timeline={timeline} agentLabels={agentLabels} />

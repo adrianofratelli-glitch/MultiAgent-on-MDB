@@ -21,6 +21,7 @@ from .reviews import list_reviews, override_rate, resolve_review
 from .llm import LLMGateway
 from .metrics import metrics
 from .models import AgentUpdate, ChatRequest, ChatResponse, ReviewResolution, TokenRequest
+from .demo_reset import reset_customer_memory
 from .warmup import WarmupService
 from .orchestration import OrchestrationService
 from .rate_limit import SlidingWindowLimiter
@@ -159,6 +160,14 @@ async def warmup(request: Request):
     if not limiter.allow(request_identity_key(request, "warmup")):
         raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "limite de requisições excedido")
     return request.app.state.warmup.trigger()
+
+
+@app.post("/api/demo/reset")
+async def demo_reset(customer: Annotated[dict, Depends(current_customer)], store: DataStore = Depends(get_store)):
+    """Desfaz o que a demo gravou NESTE cliente (customer_key do JWT, nunca do corpo) para repetir o roteiro."""
+    if not settings.demo_token_issuance_enabled:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "reset da demo desabilitado")
+    return await reset_customer_memory(store, customer["customer_key"])
 
 
 @app.get("/api/agents")

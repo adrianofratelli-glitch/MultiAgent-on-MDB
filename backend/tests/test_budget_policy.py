@@ -131,3 +131,17 @@ async def test_other_customers_budget_is_never_applied():
     store = await demo_store(budget=100)
     result = await run_product_agent(store, "me recomenda um monitor", {"customer_key": "bruno", "area": "varejo"})
     assert "price" not in result.event.filter
+
+
+async def test_limit_stated_in_the_same_message_is_also_hard_when_it_matches_the_stored_budget():
+    """"agora meu limite é R$ 300; me recomenda um monitor": o teto vem da mensagem E da memória (a extração roda
+    antes do agente). Antes tratava como "teto explícito" e relaxava em silêncio, mostrando monitores de R$ 1.199."""
+    store = await demo_store(budget=300)
+    result = await run_product_agent(store, "agora meu limite é R$ 300; me recomenda um monitor", CUSTOMER)
+    assert not result.event.result and "orçamento" in result.response
+
+
+async def test_stricter_explicit_ceiling_than_stored_budget_is_hard_too():
+    store = await demo_store(budget=1300)
+    result = await run_product_agent(store, "quero um monitor até 300 reais", CUSTOMER)
+    assert not result.event.result

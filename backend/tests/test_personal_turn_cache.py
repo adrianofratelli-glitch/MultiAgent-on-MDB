@@ -174,3 +174,45 @@ async def test_undecided_classifier_discards_global_hits():
 async def test_decisive_personal_verdict_discards_even_customer_scope():
     result = await cascade_lookup(Scoped("cache", "customer", probe_score=0.9), message=PARAPHRASE, **KW)
     assert not result.hit and result.personal_reason == "classificador"
+
+
+# ---- pedido de AÇÃO / mensagem composta nunca sai do cache semântico ----
+# Incidente real (eval live): "meu Monitor View 27 não liga; abra um chamado ... e depois recomende ..." casou
+# (>= 0,80) com a pergunta aquecida "meu monitor não liga, o que devo fazer?" e recebeu a resposta genérica, sem chamado.
+
+COMPOUND = "meu Monitor View 27 não liga; abra um chamado para um atendente e depois recomende um monitor parecido"
+
+
+async def test_action_request_bypasses_the_cache_without_any_lookup():
+    atlas = Atlas()
+    result = await cascade_lookup(atlas, message=COMPOUND, **KW)
+    assert not result.hit and result.personal_reason == "acao" and atlas.calls == []
+
+
+async def test_action_request_is_never_written_to_the_shared_cache():
+    atlas = Atlas()
+    assert await store_turn(atlas, COMPOUND) == "acao"
+    assert cached(atlas) == []
+
+
+async def test_much_longer_message_than_the_cached_question_is_discarded_even_without_action_words():
+    class Short(Atlas):
+        async def aggregate(self, name, pipeline, *, brain=False):
+            rows = await super().aggregate(name, pipeline, brain=brain)
+            if name != tc.PROBES_COLLECTION:
+                rows[0]["question_text"] = "meu monitor não liga, o que devo fazer?"
+            return rows
+    long_message = "meu monitor não liga e eu já testei o cabo e a tomada e também outro computador e continua igual, e agora, o que devo fazer?"
+    result = await cascade_lookup(Short(probe_score=0.5), message=long_message, **KW)
+    assert not result.hit and result.personal_reason == "composta"
+
+
+async def test_genuine_paraphrase_of_similar_length_is_still_served():
+    class Short(Atlas):
+        async def aggregate(self, name, pipeline, *, brain=False):
+            rows = await super().aggregate(name, pipeline, brain=brain)
+            if name != tc.PROBES_COLLECTION:
+                rows[0]["question_text"] = "meu fone chegou com defeito, o que eu faço?"
+            return rows
+    result = await cascade_lookup(Short(probe_score=0.5), message="meu fone veio com defeito, como resolvo?", **KW)
+    assert result.hit

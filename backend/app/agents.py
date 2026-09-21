@@ -636,8 +636,11 @@ async def run_product_agent(store: DataStore, message: str, customer: dict, llm=
     explicit_price = parse_price_ceiling(message)
     memory_bias = budget_brl is not None and explicit_price is None
     max_price = explicit_price if explicit_price is not None else (budget_brl if memory_bias else (350.0 if "mais barato" in normalize(message) else None))
+    # Limite duro: o teto da memória, ou um teto dito na mensagem que seja igual/mais estrito que ele. Só um teto
+    # explícito MAIS FOLGADO que o da memória (o cliente pedindo, agora, algo mais caro) pode ser relaxado.
+    hard_ceiling = budget_brl is not None and max_price is not None and max_price <= budget_brl
     products = await search_products(store, message, max_price, category)
-    if not products and category and not memory_bias:
+    if not products and category and not hard_ceiling:
         # teto de preço PEDIDO NA MENSAGEM pode ter zerado a categoria certa; melhor mostrar algo da categoria
         # do que nada. O orçamento da memória do cliente é limite duro: nunca é relaxado em silêncio.
         products = await search_products(store, message, None, category)
@@ -645,7 +648,7 @@ async def run_product_agent(store: DataStore, message: str, customer: dict, llm=
         # pergunta totalmente fora do script (ex. "o que vocês têm de bom pra presentear alguém"): dá pro
         # modelo o catálogo inteiro ativo pra ele raciocinar, em vez de simplesmente desistir.
         catalog = await store.find_many("products_catalog", {"active": True}, limit=100)
-        if memory_bias:
+        if hard_ceiling:
             catalog = [item for item in catalog if item["price"] <= max_price]
         products = [public_document(item) for item in _local_rank(catalog, message, ("name", "category", "search_text"))[:6]]
     if products:

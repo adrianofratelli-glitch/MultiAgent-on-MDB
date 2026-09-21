@@ -6,7 +6,7 @@ from .budget import estimate_tokens
 from .config import get_settings
 from . import turn_classifier
 from .database import DataStore, utcnow
-from .memory import should_extract
+from .memory import fold, should_extract
 from .router import normalize
 
 # Only catalog/KB content can be cached. The orchestrator must also pass
@@ -14,6 +14,27 @@ from .router import normalize
 # hand off, or write. Intent alone does not prove that an answer is stable.
 GLOBAL_CACHE_INTENTS = frozenset({"recomendacao", "produto_similar", "suporte", "defeito"})
 CACHE_POLICY = "stable_v1"
+
+# Pedido de AÇÃO ou mensagem composta não é "pergunta genérica já respondida": o cache semântico (>= 0,80) não
+# distingue "meu monitor não liga, o que faço?" de "meu monitor não liga; abra um chamado e depois recomende...".
+# Frases sobre texto sem acento, com borda à esquerda (mesma técnica do portão de memória, sem regex).
+_ACTION_PHRASES = (
+    "chamado", "atendente", "escal", "abra ", "abrir ", "registr", "cancel", "reembols", "estorn", "resgat",
+    "reagend", "agende", "trocar", "quero trocar", "depois ", "em seguida", "e volte", "e confirm",
+)
+# HIT semântico de uma mensagem MUITO mais longa que a pergunta guardada = pedido composto, não paráfrase.
+MAX_LENGTH_RATIO = 1.75
+
+
+def looks_like_action_request(message: str) -> bool:
+    folded = fold(message)
+    return any(f" {phrase}" in folded for phrase in _ACTION_PHRASES)
+
+
+def is_compound_of(message: str, cached_question: str | None) -> bool:
+    if not cached_question:
+        return False
+    return len(fold(message).split()) > MAX_LENGTH_RATIO * len(fold(cached_question).split()) + 2
 
 
 @dataclass
@@ -27,7 +48,8 @@ class CascadeResult:
     tokens_economizados: int = 0
     # Por que um HIT (ou a leitura) foi descartado: turno pessoal nunca vem do cache.
     scope: Literal["sessao", "customer", "global"] = "global"  # sem informação = o mais restrito
-    personal_reason: Literal["frase", "classificador", "orcamento"] | None = None
+    personal_reason: Literal["frase", "classificador", "orcamento", "acao", "composta"] | None = None
+    question_text: str | None = None  # a pergunta que gerou o HIT (para comparar tamanho com a mensagem atual)
     classifier: dict | None = None
 
 
@@ -43,9 +65,13 @@ async def cascade_lookup(store: DataStore, *, target: str, area: str, customer_k
     """
     if should_extract(message):
         return CascadeResult(hit=False, personal_reason="frase")
+    if looks_like_action_request(message):
+        return CascadeResult(hit=False, personal_reason="acao")
     result = await _cascade_lookup_raw(store, target=target, area=area, customer_key=customer_key, session_id=session_id, message=message)
     if not result.hit:
         return result
+    if is_compound_of(message, result.question_text):
+        return CascadeResult(hit=False, personal_reason="composta")
     verdict = await turn_classifier.classify(store, message)
     if verdict["personal"] and (not verdict["error"] or result.scope == "global"):
         return CascadeResult(hit=False, personal_reason="classificador", classifier=verdict)
@@ -121,6 +147,7 @@ async def _cascade_lookup_raw(store: DataStore, *, target: str, area: str, custo
         active_agent=best.get("active_agent", target),
         timeline=best.get("timeline", []),
         tokens_economizados=tokens,
+        question_text=best.get("question_text"),
         scope="sessao" if best["fonte"] == "curto_prazo" else ("customer" if best.get("scope") == "customer" else "global"),
     )
 
@@ -225,7 +252,7 @@ async def cascade_store_turn(
     timeline: list[dict],
     active_agent: str,
     cache_eligible: bool = False,
-) -> Literal["frase", "classificador"] | None:
+) -> Literal["frase", "classificador", "acao"] | None:
     """Grava sempre em curto_prazo e só promove respostas estáveis ao cache semântico.
 
     Devolve por que a promoção foi negada por ser turno pessoal ("frase" | "classificador"), ou None.
@@ -247,6 +274,8 @@ async def cascade_store_turn(
         return None
     if should_extract(message):
         return "frase"
+    if looks_like_action_request(message):
+        return "acao"
     verdict = await turn_classifier.classify(store, message)
     if verdict["personal"] and not verdict["error"]:
         return "classificador"

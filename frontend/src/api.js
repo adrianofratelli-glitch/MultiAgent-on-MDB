@@ -37,6 +37,8 @@ export const api = {
     return data.customer;
   },
   health: () => request('/api/health'),
+  // Desfaz o que a demo gravou NESTE cliente (fatos, episódios, curto prazo, cache do cliente) para repetir o roteiro.
+  demoReset: () => request('/api/demo/reset', { method: 'POST' }),
   // Aquece o cache no servidor (segundo plano, com cooldown): a demo abre já quente, sem script manual.
   warmup: () => request('/api/warmup', { method: 'POST' }).catch(() => null),
   agents: () => request('/api/agents'),

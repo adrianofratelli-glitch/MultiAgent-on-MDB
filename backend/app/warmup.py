@@ -17,6 +17,8 @@ import logging
 import time
 from collections.abc import Callable
 
+from .seed_data import MEMORY_DEMOS
+
 logger = logging.getLogger(__name__)
 
 # Perguntas genéricas que roteiam para agentes cacheáveis (produto/suporte) — medido em modo live: a repetição
@@ -28,6 +30,8 @@ GENERIC_WARMUP_PROMPTS = [
     "como parear o fone bluetooth?",
     "meu fone chegou com defeito, o que eu faço?",
     "meu mouse parou de funcionar, o que faço?",
+    # as perguntas dos chips "⚡ Cache semântico" de cada usuário: o 1º clique da demo já é HIT (mesma fonte, sem divergir)
+    *[demo["cache"] for demo in MEMORY_DEMOS.values()],
 ]
 
 

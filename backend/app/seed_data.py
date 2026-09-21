@@ -453,6 +453,62 @@ DEMO_SCENARIOS = [
     },
 ]
 
+# Roteiros das três camadas de memória + cache semântico, UM conjunto por usuário (ana, bruno, carla, diego).
+# São chips de demo (ordem importa: o que uma escreve a seguinte usa) e cada identidade tem valores próprios.
+#   cache        pergunta genérica de suporte, aquecida no start → 1º clique já é HIT global (tokens economizados)
+#   short_term   pergunta pessoal e depois a reformulação NA MESMA conversa → HIT em short_term_memory
+#                (a reformulação depende do índice vetorial, que o Atlas atualiza de forma assíncrona: se o 2º
+#                clique vier em <1 min e errar, clicar de novo acerta; a repetição EXATA é determinística)
+#   long_term_write   "me chame de X / nunca acima de R$ N" → fatos gravados em customer_memory (LLM + supersessão)
+#   long_term_use     recomendação respeitando o teto lido da memória (filtro no $vectorSearch, feito pelo servidor)
+#   long_term_update  novo teto → o fato antigo é substituído (supersessão) e a recomendação muda
+# `demo_kind` marca esses chips: ficam FORA do golden eval (têm estado entre si) e têm bateria própria em
+# tests/test_live_scenarios.py. "Reiniciar memória da demo" (POST /api/demo/reset) devolve o usuário ao estado inicial.
+MEMORY_DEMOS = {
+    "ana": {"nick": "Aninha", "item": "fone de ouvido", "limit": 400, "new_limit": 250, "order": "PED-1001",
+            "cache": "meu fone chegou com defeito, o que eu faço?"},
+    "bruno": {"nick": "Bruninho", "item": "teclado", "limit": 500, "new_limit": 300, "order": "PED-2001",
+              "cache": "o teclado não conecta, como resolvo?"},
+    "carla": {"nick": "Carlinha", "item": "caixa de som", "limit": 600, "new_limit": 250, "order": "PED-3002",
+              "cache": "meu monitor não liga, o que devo fazer?"},
+    "diego": {"nick": "Dieguinho", "item": "monitor", "limit": 1300, "new_limit": 300, "order": "PED-4001",
+              "cache": "a webcam não é reconhecida no computador, como resolvo?"},
+}
+
+
+def _memory_scenarios() -> list[dict]:
+    out = []
+    for key, d in MEMORY_DEMOS.items():
+        base = max(s["position"] for s in DEMO_SCENARIOS if s["customer_key"] == key)
+        steps = [
+            ("cache", "⚡ Cache semântico: pergunta genérica", d["cache"], ["cache global", "tokens economizados"],
+             ["support_agent"]),
+            ("short_term", "🕐 Curto prazo 1/2: pergunta do pedido", f"onde está o meu pedido {d['order']}?",
+             ["short_term_memory"], ["order_agent"]),
+            ("short_term", "🕐 Curto prazo 2/2: reformulação (mesma conversa)", f"quero saber onde está o meu pedido {d['order']}",
+             ["short_term_memory", "vectorSearch"], ["order_agent"]),
+            ("long_term_write", f"🧠 Longo prazo: gravar (nome + teto R$ {d['limit']})",
+             f"me chame de {d['nick']} e nunca me ofereça produtos acima de R$ {d['limit']}",
+             ["customer_memory", "extração LLM", "escrita"], ["product_agent"]),
+            ("long_term_use", f"🧠 Longo prazo: usar o teto (recomenda {d['item']})",
+             f"me recomenda um {d['item']}", ["customer_memory", "pré-filtro $vectorSearch"], ["product_agent"]),
+            ("long_term_update", f"🧠 Longo prazo: atualizar (teto R$ {d['new_limit']})",
+             f"agora meu limite é R$ {d['new_limit']}; me recomenda um {d['item']}",
+             ["supersessão", "customer_memory"], ["product_agent"]),
+        ]
+        for offset, (kind, label, message, caps, agents) in enumerate(steps, start=1):
+            out.append({
+                "scenario_id": f"{key}-{kind.replace('_', '-')}-{offset}", "customer_key": key,
+                "position": base + offset, "label": label, "message": message, "capabilities": caps,
+                "expected_agents": agents, "expect_handoffs": 0, "expect_revisit": False, "warmup": False,
+                "demo_kind": kind,
+            })
+    return out
+
+
+DEMO_SCENARIOS.extend(_memory_scenarios())
+
+
 # GoalSuccessRate mede exatamente o que é apresentado na UI, inclusive ordem dos agentes, writes e revisitas.
 EVAL_CASES = [
     {
@@ -463,6 +519,7 @@ EVAL_CASES = [
         **{key: value for key, value in scenario.items() if key.startswith("expect_")},
     }
     for scenario in DEMO_SCENARIOS
+    if not scenario.get("demo_kind")
 ]
 
 

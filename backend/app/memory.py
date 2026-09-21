@@ -186,7 +186,7 @@ async def extract_and_store(store: DataStore, customer_key: str, message: str, *
         retired.update(ids)
         category = candidate.get("category") if candidate.get("category") in CATEGORIES else "contexto"
         doc = {"_id": f"mem-{uuid.uuid4().hex[:16]}", "customer_key": customer_key, "fact": text,
-               "fact_norm": norm, "category": category, "active": True,
+               "fact_norm": norm, "category": category, "active": True, "source": "extractor",
                "created_at": now, "updated_at": now, "superseded_by": None}
         if price:
             doc["max_price_brl"] = price
