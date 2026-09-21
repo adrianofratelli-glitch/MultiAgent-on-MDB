@@ -125,6 +125,10 @@ No containerization (no Dockerfile/docker-compose) — local dev only, via venv 
 
 Antes de uma demo/eval que gasta estado: `python backend/restore_demo_fixtures.py` (o eval consome 500 pontos da carla por rodada). Depois de mexer em `DEMO_SCENARIOS`: `python backend/sync_demo_scenarios.py`.
 
+**O que vive no cluster Atlas (NÃO está no git — não refaça, verifique):** brain DB `multiagent_brain`: `turn_probes` (44) + índice `turn_probes_vs` + `turn_classifier_config` (limiar 0,7162); `scope_probes` (202) + índice `scope_probes_vs` + `scope_classifier_config` (margens 0,04/0,04/0,04); `guardrail_policies.vector_block_threshold` = 0,8814; `demo_scenarios` (53 roteiros, via `sync_demo_scenarios.py`). Main DB: `customer_memory` legado migrado por `migrate_legacy_memory.py` (aditivo; teto de R$ 350 removido). Adicionar probes reindexa de forma assíncrona (minutos); recalibre só depois de o probe novo ser o vizinho nº 1 dele mesmo. **O cluster precisa estar ligado**: o hook `pre-push` e todas as suítes live dependem dele (já esteve pausado uma vez e o push falhou).
+
+**Pendências conhecidas (não são bugs novos):** "me recomenda um filme" ainda vai ao `product_agent` (palavra-chave de regra de roteamento seedada, é dado); "escreva um poema" às vezes vira boas-vindas; ~2–3 ataques oscilam por ser LLM (mesmo com `temperature=0`); custo de fora-de-escopo ~400 tokens médios (faixa ambígua paga LLM); o dev de `situations.json` tem só 6 itens `in` sem palavra-chave (piso 0,04); o conjunto é gerado por LLM — falhas de tráfego real devem entrar nele. Próximo passo natural: alimentar `situations.json` com falhas reais e recalibrar (`--only scope`).
+
 Regressões de frontend: `cd frontend && node --test tests/*.test.mjs`. No workspace, `../STATUS_PORTFOLIO.md` aponta para as evidências e decisões restantes. Não faça push nem altere dataset/schema/core sem autorização específica.
 
 ## Observability (Langfuse)
