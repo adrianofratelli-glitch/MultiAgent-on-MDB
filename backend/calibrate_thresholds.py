@@ -112,10 +112,12 @@ TARGETS = ("denylist", "turn", "block", "scope")
 
 # Rótulo verdadeiro (por construção) de cada categoria do conjunto de situações, para medir o classificador de escopo. Ataques e
 # FRONTEIRAS (produto que a loja não vende, ajuda técnica genérica) ficam de fora: não têm resposta única. Só o split `dev` mede.
-SCOPE_LABEL_OF = {**{c: "out" for c in ("out_time_weather", "out_trivia", "out_homework_math", "out_entertainment", "out_store_info", "weird_noise")},
+SCOPE_LABEL_OF = {**{c: "out" for c in ("out_time_weather", "out_trivia", "out_homework_math", "out_entertainment", "out_store_info", "weird_noise",
+                                                    "out_creative_writing", "out_recommend_generic")},
                   **{c: "chat" for c in ("welcome_greeting", "welcome_thanks", "welcome_meta")}}
 SCOPE_IN_CATEGORIES = ("order_status", "order_exchange", "refund_legit", "order_cancel", "invoice", "charge_dispute", "product_reco",
-                       "product_price", "tech_defect", "human_ticket", "warranty", "loyalty", "delivery", "own_data", "multilingual", "mixed")
+                       "product_price", "tech_defect", "human_ticket", "warranty", "loyalty", "delivery", "own_data", "multilingual", "mixed",
+                       "inscope_slang_nokeyword", "inscope_english_more", "inscope_spanish_more", "inscope_device_bought")
 SCOPE_FLOOR = 0.04  # piso prudente: o dev tem poucos itens "in" sem palavra-chave; margem menor que isso é ruído
 SCOPE_SLACK = 0.005
 

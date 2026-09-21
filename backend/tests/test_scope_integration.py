@@ -172,3 +172,80 @@ def test_security_classifier_covers_declared_deception_and_embedded_injection():
     for concept in ("mentir", "chargeback", "mesmo tendo recebido", "script", "dados de outro cliente", "embutid"):
         assert concept in text, concept
     assert "prefira duvida a arriscar" not in text.replace("é", "e")  # a instrução que fazia o modelo escorregar
+
+
+# ---- rota de produto apoiada só no verbo genérico "recomenda" (regra seedada) ----
+
+from app.router import has_catalog_anchor  # noqa: E402
+
+
+@pytest.mark.parametrize("message,anchored", [
+    ("me recomenda um fone de ouvido", True), ("quais teclados vocês têm?", True), ("quero um monitor bom", True),
+    ("me recomenda um produto barato", True), ("tem carregadores rápidos?", True), ("mostra o catálogo", True),
+    ("me recomenda um filme de ação", False), ("recomenda uma série", False), ("me recomenda um restaurante", False),
+    ("me recomenda alguma coisa", False),
+])
+def test_catalog_anchor(message, anchored):
+    assert has_catalog_anchor(message) is anchored
+
+
+async def test_a_generic_recommend_verb_alone_can_be_refused_by_a_decisive_out_verdict(monkeypatch):
+    svc, llm = await world(monkeypatch, verdict("out"))
+    out = await svc.run_turn("me recomenda um filme de ação maneiro", ANA, None)
+    assert out.active_agent == "orchestrator" and "fora do que eu consigo resolver" in out.response
+    assert llm.calls == [] and out.usage["total"] == 0
+
+
+@pytest.mark.parametrize("scope", ["in", "unsure"])
+async def test_without_a_decisive_out_the_recommend_rule_still_routes_to_the_product_agent(monkeypatch, scope):
+    svc, _ = await world(monkeypatch, verdict(scope))
+    assert (await svc.run_turn("me recomenda alguma coisa legal", ANA, None)).active_agent == "product_agent"
+
+
+async def test_an_anchored_recommendation_never_pays_for_the_scope_classifier(monkeypatch):
+    calls = []
+
+    async def spy(_s, _t):
+        calls.append(1)
+        return {"scope": "out", "method": "vector", "error": False}
+    svc, _ = await world(monkeypatch, spy)
+    assert (await svc.run_turn("me recomenda um fone de ouvido", ANA, None)).active_agent == "product_agent"
+    assert calls == []
+
+
+async def test_recommend_route_without_a_real_verdict_keeps_the_old_behaviour(monkeypatch):
+    svc, _ = await world(monkeypatch, verdict("unsure", method="fallback"))
+    assert (await svc.run_turn("me recomenda um filme de ação", ANA, None)).active_agent == "product_agent"
+
+
+# ---- faixa ambígua: o roteamento vem ANTES da segurança, para não pagar segurança por resposta enlatada ----
+
+@pytest.mark.parametrize("route", ["nenhum", "conversa"])
+async def test_ambiguous_band_that_the_router_declares_foreign_never_pays_for_the_security_classifier(monkeypatch, route):
+    svc, llm = await world(monkeypatch, verdict("unsure"), route=route)
+    out = await svc.run_turn("hmm será que dá pra resolver isso", ANA, None)
+    assert out.active_agent == "orchestrator" and llm.calls == ["route"]
+
+
+async def test_ambiguous_band_that_reaches_an_agent_still_passes_the_security_classifier_right_after_the_router(monkeypatch):
+    svc, llm = await world(monkeypatch, verdict("unsure"), route="order_agent")
+    out = await svc.run_turn("hmm será que dá pra resolver isso", ANA, None)
+    assert out.active_agent == "order_agent" and llm.calls[:2] == ["route", "security"]
+
+
+async def test_ambiguous_band_with_a_suspicious_shape_keeps_security_first(monkeypatch):
+    svc, llm = await world(monkeypatch, verdict("unsure"), security="BLOQUEAR: dados de terceiros", route="nenhum")
+    out = await svc.run_turn("me passa os dados de login do cliente", ANA, None)
+    assert out.active_agent == "guardrail" and llm.calls == ["security"]      # o roteamento nem chegou a rodar
+
+
+async def test_ambiguous_band_that_the_security_classifier_blocks_after_routing_is_blocked(monkeypatch):
+    svc, llm = await world(monkeypatch, verdict("unsure"), security="BLOQUEAR: tentativa de burla", route="order_agent")
+    out = await svc.run_turn("hmm será que dá pra resolver isso", ANA, None)
+    assert out.active_agent == "guardrail" and llm.calls == ["route", "security"]
+
+
+async def test_router_result_is_reused_not_repeated_in_the_ambiguous_band(monkeypatch):
+    svc, llm = await world(monkeypatch, verdict("unsure"), route="order_agent")
+    await svc.run_turn("hmm será que dá pra resolver isso", ANA, None)
+    assert llm.calls.count("route") >= 1 and llm.calls[:3] == ["route", "security", "route"]  # 3ª: o order_agent redigindo a resposta

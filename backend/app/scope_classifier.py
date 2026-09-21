@@ -82,6 +82,9 @@ OUT_OF_SCOPE_PROBES = [
     "resultado do jogo de ontem", "qual meu signo hoje", "me dá uma dica de livro", "onde comer pizza perto de mim", "como chegar no aeroporto",
     "como fazer um bolo", "como emagrecer rápido", "estou triste, me dá um conselho", "traduz isso pra espanhol", "quanto está o dólar hoje",
     "bitcoin vai subir?", "me conta uma história", "adivinha um número", "você tem namorada?",
+    "me recomenda um restaurante bom", "qual podcast você indica", "me indica um app de organização", "recomenda uma série pra maratonar",
+    "me sugere uma música nova", "qual livro você recomenda ler", "recomenda um jogo pro fim de semana", "me indica um curso online",
+    "escreve uma carta de amor pra mim", "faz um discurso de formatura", "cria uma letra de música", "escreve um poema sobre a vida",
 ]
 
 

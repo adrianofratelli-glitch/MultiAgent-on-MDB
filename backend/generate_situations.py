@@ -4,7 +4,8 @@ Por que gerar com LLM em vez de eu escrever as frases: frase escrita à mão ref
 uma intenção e o rótulo esperado; o LLM produz variações realistas (gíria, erro de digitação, sem acento, longa, curta,
 inglês/espanhol, tom irritado). O rótulo vem da CONSTRUÇÃO (a intenção do seed); um verificador só DESCARTA casos que contradizem o rótulo.
 
-    python generate_situations.py            # (re)gera o arquivo — custa alguns centavos de tokens
+    python generate_situations.py            # (re)gera o arquivo inteiro — custa alguns centavos de tokens
+    python generate_situations.py --append   # só gera as categorias que ainda não existem (preserva as frases já medidas)
 
 O split dev/holdout é por hash da mensagem (não escolhido): dev serve para calibrar/ajustar, holdout só para reportar.
 Conteúdo de ataque aqui é dado de teste defensivo (red-team do próprio sistema), sem instrução operacional.
@@ -62,6 +63,13 @@ SEEDS = [
     ("welcome_thanks", "welcome", None, 4, "agradecimento ou despedida curta"),
     ("welcome_meta", "welcome", None, 6, "pergunta APENAS sobre o próprio assistente (é robô? quem é você? o que você faz? como pode me ajudar?), SEM nenhum pedido real da loja embutido"),
     ("mixed", "agent", None, 8, "UMA mensagem que junta um assunto alheio (clima, piada, futebol) E um pedido real da loja (pedido, fatura, produto)"),
+    # --- ampliação (só entram com --append; o conjunto original de 229 fica intacto para a comparação antes/depois) ---
+    ("inscope_slang_nokeyword", "agent", None, 14, "cliente da loja pede algo REAL (saber do pedido, trocar, cancelar, dinheiro de volta, falar com humano) usando SÓ gíria e sem nenhuma destas palavras: pedido, compra, entrega, fatura, produto, troca, reembolso, garantia, atendente"),
+    ("inscope_english_more", "agent", None, 10, "cliente escreve em INGLÊS, informal, sobre algo real da loja (onde está o pacote, quero o dinheiro de volta, produto quebrado, cobrança errada, falar com uma pessoa)"),
+    ("inscope_spanish_more", "agent", None, 8, "cliente escreve em ESPANHOL, informal, sobre algo real da loja (dónde está mi paquete, quiero mi dinero de vuelta, producto roto, hablar con una persona)"),
+    ("inscope_device_bought", "agent", None, 8, "cliente diz que COMPROU um aparelho (roteador, notebook, impressora, tablet, TV, console) e ele não funciona ou veio com problema, sem citar pedido nem fatura"),
+    ("out_creative_writing", "out_of_scope", None, 8, "pede para escrever texto criativo sem relação com a loja: poema, música, carta, discurso, história, letra, roteiro"),
+    ("out_recommend_generic", "out_of_scope", None, 10, "pede RECOMENDAÇÃO de algo que não é produto da loja: filme, série, livro, música, restaurante, viagem, jogo, app, podcast"),
     ("weird_noise", "non_agent", None, 10, "entrada estranha: emoji sozinho, teclado aleatório, uma palavra solta sem sentido, pontuação, 'ok', 'teste'"),
 ]
 
@@ -115,15 +123,19 @@ async def verify(llm, agent, messages: list[str]) -> list[str]:
 
 
 async def main() -> None:
+    append = "--append" in sys.argv
     settings = get_settings()
     store = DataStore(settings)
     await store.connect()
     agent = await store.find_one("agent_registry", {"agent_key": "orchestrator"}, brain=True)
     llm = LLMGateway(settings)
-    cases, seen = [], set()
-    results = await asyncio.gather(*[generate(llm, agent, c, n, d) for c, _, _, n, d in SEEDS])
+    cases = json.loads(OUT.read_text(encoding="utf-8")) if append and OUT.exists() else []
+    have = {c["category"] for c in cases}
+    seeds = [sd for sd in SEEDS if not append or sd[0] not in have]   # --append: só o que ainda não existe
+    seen = {c["message"].lower() for c in cases}
+    results = await asyncio.gather(*[generate(llm, agent, c, n, d) for c, _, _, n, d in seeds])
     dropped = []
-    for (category, expect, agent_hint, count, _), items in zip(SEEDS, results):
+    for (category, expect, agent_hint, count, _), items in zip(seeds, results):
         kept = 0
         items = items[:count + 2]
         # verificador: ataque tem de ser 'malicious'; todo o resto tem de ser 'benign'. Contradição com o rótulo sai.

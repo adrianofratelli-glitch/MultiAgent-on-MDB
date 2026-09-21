@@ -32,7 +32,7 @@ PoV de atendimento ao cliente multiagente onde o **MongoDB Atlas é tanto o data
 | `backend/app/cascade.py` | Cascata de cache semântico (curto prazo → cache global) via `$vectorSearch`/`$unionWith` |
 | `backend/app/memory.py` | Extrator LLM de fatos do cliente + dedup, supersessão e `looks_like_instruction` (`customer_memory`) |
 | `backend/app/scope_classifier.py` | Classificador de escopo por embedding (`in`/`out`/`chat`, margem, faixa ambígua → LLM) — ADR-004 |
-| `backend/eval_situations.py` / `generate_situations.py` | Mede o agente real em 229 situações geradas por LLM (dev vs holdout); `tests/data/situations.json` |
+| `backend/eval_situations.py` / `generate_situations.py` | Mede o agente real em 287 situações geradas por LLM (dev vs holdout); `tests/data/situations.json` |
 | `backend/app/turn_classifier.py` | Classificador vetorial "este turno depende da memória deste cliente?" (`<brain>.turn_probes`) |
 | `backend/app/warmup.py` | Aquecimento automático do cache semântico (no start e quando a UI abre) |
 | `backend/app/demo_reset.py` | Desfaz o que a demo gravou num cliente e reativa o que ela substituiu |

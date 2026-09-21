@@ -153,6 +153,15 @@ def out_of_scope_sentences(message: str) -> list[str]:
     return [part for part in sentences if not has_domain_signal(part) and not has_weak_signal(part)][:2]
 
 
+def has_catalog_anchor(message: str) -> bool:
+    """A mensagem cita algo do catálogo (categoria de produto, "produto", "catálogo")?
+
+    A regra seedada `recomendacao` casa "recomenda" sozinho, então "me recomenda um filme" ganha rota de `product_agent`. Sem uma
+    âncora de catálogo, a rota de produto se apoia só no verbo genérico e pode ser recusada pelo classificador de escopo."""
+    words = _padded(message).split()
+    return any(word.startswith(key) for word in words for key in (*CATEGORY_KEYWORDS, "produto", "catalogo"))
+
+
 def deterministic_orchestrator(message: str) -> RouteDecision:
     text = normalize(message)
     if any(word in text for word in ("defeito", "quebrado", "nao funciona", "suporte", "nao conecta", "nao liga", "como resolvo")):

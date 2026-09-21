@@ -16,7 +16,7 @@ from .memory import active_budget, extract_and_store, looks_like_instruction
 from .metrics import metrics
 from .models import ChatResponse, TimelineEvent
 from .router import (RouteDecision, cheap_route, deterministic_orchestrator, detect_fanout, has_domain_signal,
-                     has_weak_signal, out_of_scope_sentences)
+                     has_weak_signal, has_catalog_anchor, out_of_scope_sentences)
 from .guidance import (blocked_reply, build_suggestions, customer_snapshot, greeting_reply,
                        is_capabilities_question, is_greeting, is_meta_question, is_thanks, looks_like_own_pii, meta_reply,
                        out_of_scope_reply, pii_block_reply, thanks_reply)
@@ -114,6 +114,13 @@ class OrchestrationService:
         self.llm = llm
         self.global_budget = global_budget
 
+    async def _route_with_llm(self, message: str, orchestrator: dict, allowed: list[str], budget) -> str | None:
+        """Uma linha: a chave do agente, `conversa` ou `nenhum`. Classificar é decisão, não criação: temperature 0."""
+        text, _ = await self.llm.complete(
+            agent={**orchestrator, "temperature": 0}, user_message=message,
+            dynamic_context=ROUTER_PROMPT + ", ".join(allowed) + ", conversa, nenhum", budget=budget)
+        return text
+
     @staticmethod
     def _usage(budget):
         return {**budget.used_by_agent, "total": budget.total_used,
@@ -149,7 +156,10 @@ class OrchestrationService:
         # previu). Só consulta quando nenhuma regra nem palavra forte decidiu e a mensagem não é saudação/agradecimento/meta óbvia. Sem
         # veredito REAL (DEMO_MODE, índice ausente, limiar não medido, erro) volta ao comportamento anterior, por palavras.
         scope_verdict = None
-        if quick_decision is None and reaches_scope_classifier(masked):
+        # rota de produto apoiada só no verbo genérico "recomenda" (regra seedada): o escopo pode recusá-la se for decisivo
+        weak_product_route = (quick_decision is not None and quick_decision.target_agent == "product_agent"
+                              and not has_catalog_anchor(masked))
+        if (quick_decision is None and reaches_scope_classifier(masked)) or weak_product_route:
             try:
                 scope_verdict = await scope_classifier.classify(self.store, masked)
             except Exception:  # noqa: BLE001 — classificador de escopo nunca derruba o turno
@@ -166,7 +176,15 @@ class OrchestrationService:
                                 and deterministic_orchestrator(masked).source == "fallback")
         # forma de exfiltração/autoridade/injeção embrulhada em qualquer coisa ainda merece o classificador (é ele que marca como ataque)
         suspicious = looks_like_instruction(masked) or needs_security_review(masked)
-        skip_guardrail_llm = (quick_decision is not None or no_domain_signal) and not suspicious
+        # Faixa ambígua sem suspeita: o roteamento vem ANTES da segurança. Se ele concluir `nenhum`/`conversa`, a resposta é enlatada e o
+        # classificador de segurança (~370 tokens) não compra nada; se escolher um agente, a segurança roda logo em seguida, como sempre.
+        pre_route, canned_route = None, False
+        orchestrator_doc = registry.get("orchestrator")
+        if (scope_verdict is not None and scope_verdict["scope"] == "unsure" and quick_decision is None and not suspicious
+                and not has_domain_signal(masked) and orchestrator_doc and self.llm.client):
+            pre_route = await self._route_with_llm(masked, orchestrator_doc, [key for key in RUNNERS if key in registry], budget)
+            canned_route = (pre_route or "").strip().lower().startswith(("nenhum", "conversa"))
+        skip_guardrail_llm = (quick_decision is not None or no_domain_signal or canned_route) and not suspicious
         guardrail = await check_input(self.store, masked, customer, llm=self.llm, budget=budget, agent_doc=registry.get("orchestrator"), skip_semantic=skip_guardrail_llm)
         guardrail_title = "Guardrail de entrada"
         if guardrail.blocked and guardrail.reason == "semantic_llm":
@@ -201,6 +219,9 @@ class OrchestrationService:
 
         decision = quick_decision
         scope_reason, chat_verdict = None, False
+        if weak_product_route and scope_verdict is not None and scope_verdict["scope"] == "out":
+            decision = RouteDecision("fora_de_escopo", None, "fallback", 0.0)
+            scope_reason = "classificador_de_escopo"
         if decision is None:
             decision = deterministic_orchestrator(masked)
             orchestrator = registry.get("orchestrator")
@@ -225,12 +246,7 @@ class OrchestrationService:
                     scope_reason = reason
             if decision.source == "fallback" and decision.target_agent is not None and llm_ok:
                 allowed = [key for key in RUNNERS if key in registry]
-                llm_route, _ = await self.llm.complete(
-                    agent={**orchestrator, "temperature": 0},  # classificar é decisão, não criação: sem variação de amostragem
-                    user_message=masked,
-                    dynamic_context=ROUTER_PROMPT + ", ".join(allowed) + ", conversa, nenhum",
-                    budget=budget,
-                )
+                llm_route = pre_route if pre_route is not None else await self._route_with_llm(masked, orchestrator, allowed, budget)
                 first_line = (llm_route or "").strip().splitlines()[0].strip().lower() if llm_route else ""
                 matched = next((key for key in allowed if key.lower() == first_line), None) or next(
                     (key for key in allowed if key in (llm_route or "")), None

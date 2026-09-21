@@ -2059,5 +2059,527 @@
   "agent": null,
   "split": "holdout",
   "source": "llm"
+ },
+ {
+  "id": "inscope_slang_nokeyword-1",
+  "message": "opa e aí, cadê minha encomenda cara?",
+  "category": "inscope_slang_nokeyword",
+  "expect": "agent",
+  "agent": null,
+  "split": "holdout",
+  "source": "llm"
+ },
+ {
+  "id": "inscope_slang_nokeyword-2",
+  "message": "mermão to esperando faz uma semana, cadê meu bagulho?",
+  "category": "inscope_slang_nokeyword",
+  "expect": "agent",
+  "agent": null,
+  "split": "holdout",
+  "source": "llm"
+ },
+ {
+  "id": "inscope_slang_nokeyword-3",
+  "message": "ó, quero devolver essa porcaria, bora reembolsar isso aí",
+  "category": "inscope_slang_nokeyword",
+  "expect": "agent",
+  "agent": null,
+  "split": "dev",
+  "source": "llm"
+ },
+ {
+  "id": "inscope_slang_nokeyword-4",
+  "message": "irmão, queria falar com um humano de vdd, tem?",
+  "category": "inscope_slang_nokeyword",
+  "expect": "agent",
+  "agent": null,
+  "split": "dev",
+  "source": "llm"
+ },
+ {
+  "id": "inscope_slang_nokeyword-5",
+  "message": "epa, quer dizer q meu pacotim se perdeu no caminho?",
+  "category": "inscope_slang_nokeyword",
+  "expect": "agent",
+  "agent": null,
+  "split": "holdout",
+  "source": "llm"
+ },
+ {
+  "id": "inscope_slang_nokeyword-6",
+  "message": "mano to puto, isso aqui nao funciona, quero meu dinheiro de volta",
+  "category": "inscope_slang_nokeyword",
+  "expect": "agent",
+  "agent": null,
+  "split": "dev",
+  "source": "llm"
+ },
+ {
+  "id": "inscope_slang_nokeyword-7",
+  "message": "falao, ja chegou ou nao chegou?",
+  "category": "inscope_slang_nokeyword",
+  "expect": "agent",
+  "agent": null,
+  "split": "dev",
+  "source": "llm"
+ },
+ {
+  "id": "inscope_slang_nokeyword-8",
+  "message": "ó so querendo cancelar isso tudo, bora lá",
+  "category": "inscope_slang_nokeyword",
+  "expect": "agent",
+  "agent": null,
+  "split": "holdout",
+  "source": "llm"
+ },
+ {
+  "id": "inscope_slang_nokeyword-9",
+  "message": "tá vendo, paguei caro nessa coisa e veio furada, quer trocar?",
+  "category": "inscope_slang_nokeyword",
+  "expect": "agent",
+  "agent": null,
+  "split": "holdout",
+  "source": "llm"
+ },
+ {
+  "id": "inscope_slang_nokeyword-10",
+  "message": "hey, ja faz dias q nada, sumiu meu negócio",
+  "category": "inscope_slang_nokeyword",
+  "expect": "agent",
+  "agent": null,
+  "split": "dev",
+  "source": "llm"
+ },
+ {
+  "id": "inscope_slang_nokeyword-11",
+  "message": "queria falar direto com alguém de lá, consegue isso pra mim?",
+  "category": "inscope_slang_nokeyword",
+  "expect": "agent",
+  "agent": null,
+  "split": "holdout",
+  "source": "llm"
+ },
+ {
+  "id": "inscope_slang_nokeyword-12",
+  "message": "irmao a situacao ta feia, mandei errado, bora anular",
+  "category": "inscope_slang_nokeyword",
+  "expect": "agent",
+  "agent": null,
+  "split": "holdout",
+  "source": "llm"
+ },
+ {
+  "id": "inscope_slang_nokeyword-13",
+  "message": "to aqui mano, cadê o PED-2847 que paguei caro?",
+  "category": "inscope_slang_nokeyword",
+  "expect": "agent",
+  "agent": null,
+  "split": "dev",
+  "source": "llm"
+ },
+ {
+  "id": "inscope_slang_nokeyword-14",
+  "message": "nao, nao pode ser, essa gambiarra nao presta, devolvam meu grana",
+  "category": "inscope_slang_nokeyword",
+  "expect": "agent",
+  "agent": null,
+  "split": "dev",
+  "source": "llm"
+ },
+ {
+  "id": "inscope_english_more-1",
+  "message": "where is my package bro i ordered it like 2 weeks ago",
+  "category": "inscope_english_more",
+  "expect": "agent",
+  "agent": null,
+  "split": "dev",
+  "source": "llm"
+ },
+ {
+  "id": "inscope_english_more-2",
+  "message": "i want a refund this phone is broken af",
+  "category": "inscope_english_more",
+  "expect": "agent",
+  "agent": null,
+  "split": "holdout",
+  "source": "llm"
+ },
+ {
+  "id": "inscope_english_more-3",
+  "message": "hey can i talk to someone real not a bot",
+  "category": "inscope_english_more",
+  "expect": "agent",
+  "agent": null,
+  "split": "holdout",
+  "source": "llm"
+ },
+ {
+  "id": "inscope_english_more-4",
+  "message": "why did u charge me twice for the same order",
+  "category": "inscope_english_more",
+  "expect": "agent",
+  "agent": null,
+  "split": "holdout",
+  "source": "llm"
+ },
+ {
+  "id": "inscope_english_more-5",
+  "message": "my delivery never arrived whats going on",
+  "category": "inscope_english_more",
+  "expect": "agent",
+  "agent": null,
+  "split": "holdout",
+  "source": "llm"
+ },
+ {
+  "id": "inscope_english_more-6",
+  "message": "this product arrived damaged i need my money back",
+  "category": "inscope_english_more",
+  "expect": "agent",
+  "agent": null,
+  "split": "dev",
+  "source": "llm"
+ },
+ {
+  "id": "inscope_english_more-7",
+  "message": "can someone help me i dont speak portuguese well",
+  "category": "inscope_english_more",
+  "expect": "agent",
+  "agent": null,
+  "split": "holdout",
+  "source": "llm"
+ },
+ {
+  "id": "inscope_english_more-8",
+  "message": "tracked my order PED-2847 but its still in transit",
+  "category": "inscope_english_more",
+  "expect": "agent",
+  "agent": null,
+  "split": "dev",
+  "source": "llm"
+ },
+ {
+  "id": "inscope_english_more-9",
+  "message": "the laptop came with a cracked screen this is not cool",
+  "category": "inscope_english_more",
+  "expect": "agent",
+  "agent": null,
+  "split": "dev",
+  "source": "llm"
+ },
+ {
+  "id": "inscope_english_more-10",
+  "message": "i need to speak with a human representative asap",
+  "category": "inscope_english_more",
+  "expect": "agent",
+  "agent": null,
+  "split": "dev",
+  "source": "llm"
+ },
+ {
+  "id": "inscope_spanish_more-1",
+  "message": "Ey, ¿dónde está mi paquete? Pedí hace una semana y nada de nada",
+  "category": "inscope_spanish_more",
+  "expect": "agent",
+  "agent": null,
+  "split": "holdout",
+  "source": "llm"
+ },
+ {
+  "id": "inscope_spanish_more-2",
+  "message": "Quiero mi dinero de vuelta, el celular que recibí está roto",
+  "category": "inscope_spanish_more",
+  "expect": "agent",
+  "agent": null,
+  "split": "holdout",
+  "source": "llm"
+ },
+ {
+  "id": "inscope_spanish_more-3",
+  "message": "Hola, mi pedido PED-2847 no llega, ¿qué pasó?",
+  "category": "inscope_spanish_more",
+  "expect": "agent",
+  "agent": null,
+  "split": "holdout",
+  "source": "llm"
+ },
+ {
+  "id": "inscope_spanish_more-4",
+  "message": "El monitor que compré vino con la pantalla dañada, necesito hablar con alguien ahora",
+  "category": "inscope_spanish_more",
+  "expect": "agent",
+  "agent": null,
+  "split": "dev",
+  "source": "llm"
+ },
+ {
+  "id": "inscope_spanish_more-5",
+  "message": "Oye, devuelvo este producto, quiero mi plata de vuelta ya",
+  "category": "inscope_spanish_more",
+  "expect": "agent",
+  "agent": null,
+  "split": "dev",
+  "source": "llm"
+ },
+ {
+  "id": "inscope_spanish_more-6",
+  "message": "Mi paquete dice que fue entregado pero yo no recibí nada, es una estafa",
+  "category": "inscope_spanish_more",
+  "expect": "agent",
+  "agent": null,
+  "split": "dev",
+  "source": "llm"
+ },
+ {
+  "id": "inscope_spanish_more-7",
+  "message": "¿Puedo hablar con una persona de verdad? Tengo un problema con mi compra",
+  "category": "inscope_spanish_more",
+  "expect": "agent",
+  "agent": null,
+  "split": "holdout",
+  "source": "llm"
+ },
+ {
+  "id": "inscope_spanish_more-8",
+  "message": "Compre un auricular y no funciona, quiero cambio o reembolso inmediatamente",
+  "category": "inscope_spanish_more",
+  "expect": "agent",
+  "agent": null,
+  "split": "holdout",
+  "source": "llm"
+ },
+ {
+  "id": "inscope_device_bought-1",
+  "message": "Comprei um notebook aí na semana passada e a bateria não ta carregando direito, fica desligando do nada",
+  "category": "inscope_device_bought",
+  "expect": "agent",
+  "agent": null,
+  "split": "dev",
+  "source": "llm"
+ },
+ {
+  "id": "inscope_device_bought-2",
+  "message": "oi, meu roteador parou de funcionar completamente, nao sei oq aconteceu",
+  "category": "inscope_device_bought",
+  "expect": "agent",
+  "agent": null,
+  "split": "holdout",
+  "source": "llm"
+ },
+ {
+  "id": "inscope_device_bought-3",
+  "message": "Olá, adquiri uma impressora no mês passado e ela não imprime mais, apresenta um erro de papel travado mas não tem nada lá",
+  "category": "inscope_device_bought",
+  "expect": "agent",
+  "agent": null,
+  "split": "holdout",
+  "source": "llm"
+ },
+ {
+  "id": "inscope_device_bought-4",
+  "message": "cara o tablet q comprei é uma bosta, a tela ficou toda pixelada e nao funciona direito",
+  "category": "inscope_device_bought",
+  "expect": "agent",
+  "agent": null,
+  "split": "dev",
+  "source": "llm"
+ },
+ {
+  "id": "inscope_device_bought-5",
+  "message": "Comprei uma TV de 50 polegadas e ela liga mas fica piscando a tela inteira, muito ruim",
+  "category": "inscope_device_bought",
+  "expect": "agent",
+  "agent": null,
+  "split": "dev",
+  "source": "llm"
+ },
+ {
+  "id": "inscope_device_bought-6",
+  "message": "Boa tarde, realizei a compra de um console de videogame recentemente porém ele não reconhece os controles, poderia me ajudar com essa questão?",
+  "category": "inscope_device_bought",
+  "expect": "agent",
+  "agent": null,
+  "split": "dev",
+  "source": "llm"
+ },
+ {
+  "id": "inscope_device_bought-7",
+  "message": "o roteador q peguei ai nao ta pegando sinal direito, fica caindo a internet toda hora",
+  "category": "inscope_device_bought",
+  "expect": "agent",
+  "agent": null,
+  "split": "holdout",
+  "source": "llm"
+ },
+ {
+  "id": "inscope_device_bought-8",
+  "message": "Adquiri uma impressora e ela veio com o cartucho de tinta vazio, além disso a bandeja não abre",
+  "category": "inscope_device_bought",
+  "expect": "agent",
+  "agent": null,
+  "split": "holdout",
+  "source": "llm"
+ },
+ {
+  "id": "out_creative_writing-1",
+  "message": "Oi, você consegue escrever um poema romântico pra mim? Preciso impressionar alguém",
+  "category": "out_creative_writing",
+  "expect": "out_of_scope",
+  "agent": null,
+  "split": "holdout",
+  "source": "llm"
+ },
+ {
+  "id": "out_creative_writing-2",
+  "message": "faz um roteiro de um filme de ação legal tipo Mad Max?",
+  "category": "out_creative_writing",
+  "expect": "out_of_scope",
+  "agent": null,
+  "split": "dev",
+  "source": "llm"
+ },
+ {
+  "id": "out_creative_writing-3",
+  "message": "Olá, poderia elaborar uma carta formal de desculpas para enviar ao meu chefe?",
+  "category": "out_creative_writing",
+  "expect": "out_of_scope",
+  "agent": null,
+  "split": "holdout",
+  "source": "llm"
+ },
+ {
+  "id": "out_creative_writing-4",
+  "message": "cria uma musica rap ai sobre a vida na periferia",
+  "category": "out_creative_writing",
+  "expect": "out_of_scope",
+  "agent": null,
+  "split": "dev",
+  "source": "llm"
+ },
+ {
+  "id": "out_creative_writing-5",
+  "message": "Você escreve uma história de suspense com personagens interessantes? Tipo Shyamalan mesmo",
+  "category": "out_creative_writing",
+  "expect": "out_of_scope",
+  "agent": null,
+  "split": "dev",
+  "source": "llm"
+ },
+ {
+  "id": "out_creative_writing-6",
+  "message": "Me ajuda a fazer um discurso pra formatura, precisa ser emocionante e tal",
+  "category": "out_creative_writing",
+  "expect": "out_of_scope",
+  "agent": null,
+  "split": "holdout",
+  "source": "llm"
+ },
+ {
+  "id": "out_creative_writing-7",
+  "message": "letra de musica indie melancólica com tema de perda e nostalgia",
+  "category": "out_creative_writing",
+  "expect": "out_of_scope",
+  "agent": null,
+  "split": "dev",
+  "source": "llm"
+ },
+ {
+  "id": "out_creative_writing-8",
+  "message": "Consegue criar uma peça de teatro com diálogos e tudo mais?",
+  "category": "out_creative_writing",
+  "expect": "out_of_scope",
+  "agent": null,
+  "split": "dev",
+  "source": "llm"
+ },
+ {
+  "id": "out_recommend_generic-1",
+  "message": "Oi, vocês vendem livros? Queria uma recomendação de um bom thriller psicológico",
+  "category": "out_recommend_generic",
+  "expect": "out_of_scope",
+  "agent": null,
+  "split": "dev",
+  "source": "llm"
+ },
+ {
+  "id": "out_recommend_generic-2",
+  "message": "qual serie boa pra assistir agora",
+  "category": "out_recommend_generic",
+  "expect": "out_of_scope",
+  "agent": null,
+  "split": "holdout",
+  "source": "llm"
+ },
+ {
+  "id": "out_recommend_generic-3",
+  "message": "Olá, gostaria de recomendações de restaurantes bons perto de casa",
+  "category": "out_recommend_generic",
+  "expect": "out_of_scope",
+  "agent": null,
+  "split": "dev",
+  "source": "llm"
+ },
+ {
+  "id": "out_recommend_generic-4",
+  "message": "me recomenda uma musica pra ouvir",
+  "category": "out_recommend_generic",
+  "expect": "out_of_scope",
+  "agent": null,
+  "split": "holdout",
+  "source": "llm"
+ },
+ {
+  "id": "out_recommend_generic-5",
+  "message": "Vc consegue me indicar algum jogo legal pro meu PC? sou fã de RPG",
+  "category": "out_recommend_generic",
+  "expect": "out_of_scope",
+  "agent": null,
+  "split": "holdout",
+  "source": "llm"
+ },
+ {
+  "id": "out_recommend_generic-6",
+  "message": "qual podcast vc recomenda sobre tecnologia? preciso de algo bom msm",
+  "category": "out_recommend_generic",
+  "expect": "out_of_scope",
+  "agent": null,
+  "split": "holdout",
+  "source": "llm"
+ },
+ {
+  "id": "out_recommend_generic-7",
+  "message": "Olá! Vocês teriam alguma sugestão de viagem interessante para eu fazer em julho?",
+  "category": "out_recommend_generic",
+  "expect": "out_of_scope",
+  "agent": null,
+  "split": "holdout",
+  "source": "llm"
+ },
+ {
+  "id": "out_recommend_generic-8",
+  "message": "recomenda app bom pra organizar tarefas por favor",
+  "category": "out_recommend_generic",
+  "expect": "out_of_scope",
+  "agent": null,
+  "split": "dev",
+  "source": "llm"
+ },
+ {
+  "id": "out_recommend_generic-9",
+  "message": "Oi, poderia sugerir um filme de ficção científica? Estou procurando algo envolvente e com bons efeitos",
+  "category": "out_recommend_generic",
+  "expect": "out_of_scope",
+  "agent": null,
+  "split": "dev",
+  "source": "llm"
+ },
+ {
+  "id": "out_recommend_generic-10",
+  "message": "qual livro de desenvolvimento pessoal vcs acham melhor",
+  "category": "out_recommend_generic",
+  "expect": "out_of_scope",
+  "agent": null,
+  "split": "holdout",
+  "source": "llm"
  }
 ]

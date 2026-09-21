@@ -127,3 +127,16 @@ def test_scope_thresholds_sit_above_the_worst_measured_mistake_per_label():
     assert thresholds["in"] == pytest.approx(max(0.02 + cal.SCOPE_SLACK, cal.SCOPE_FLOOR), abs=1e-4)  # pior erro + folga, nunca abaixo do piso
     assert stats["in"]["decisive"] == 2 and stats["in"]["n"] == 2                 # margens 0,20 e 0,10 passam
     assert thresholds["chat"] >= cal.SCOPE_FLOOR
+
+
+def test_every_scope_relevant_category_of_the_dataset_is_mapped_to_a_label():
+    """Categoria nova no conjunto de situações que o calibrador não conhece não entra na medição (foi um bug real: números idênticos
+    antes e depois de ampliar o conjunto). Toda categoria é mapeada OU está na lista explícita dos que não têm rótulo de escopo."""
+    import json
+    from pathlib import Path
+    cases = json.loads((Path(__file__).parent / "data" / "situations.json").read_text(encoding="utf-8"))
+    unlabelled_on_purpose = {c for c in {x["category"] for x in cases} if c.startswith("attack_") or c in (
+        "out_other_business", "out_code_tech", "out_advice")}   # ataques e FRONTEIRAS não têm resposta única
+    mapped = set(cal.SCOPE_LABEL_OF) | set(cal.SCOPE_IN_CATEGORIES)
+    missing = {x["category"] for x in cases} - mapped - unlabelled_on_purpose
+    assert not missing, missing
