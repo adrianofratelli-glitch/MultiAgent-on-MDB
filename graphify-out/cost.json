@@ -1,0 +1,57 @@
+{
+  "runs": [
+    {
+      "date": "2026-07-16T20:52:41.426177+00:00",
+      "input_tokens": 84299,
+      "output_tokens": 0,
+      "files": 49
+    },
+    {
+      "date": "2026-08-18T14:20:31.182269+00:00",
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "files": 48
+    },
+    {
+      "date": "2026-09-03T10:45:36.562585+00:00",
+      "input_tokens": 15000,
+      "output_tokens": 6000,
+      "files": 75
+    },
+    {
+      "date": "2026-09-18T01:35:54.486404+00:00",
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "files": 14
+    },
+    {
+      "date": "2026-09-19T20:57:57.500289+00:00",
+      "input_tokens": 221318,
+      "output_tokens": 0,
+      "files": 23
+    },
+    {
+      "date": "2026-09-21T09:59:39.152799+00:00",
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "files": 54,
+      "note": "update incremental: 44 código (AST) + 10 docs (2 subagentes; tokens não medidos aqui)"
+    },
+    {
+      "date": "2026-09-21T12:01:36.491002+00:00",
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "files": 24,
+      "note": "update incremental: 15 código (AST) + 9 docs (2 subagentes; tokens não medidos aqui)"
+    },
+    {
+      "date": "2026-09-21T14:50:18.266608+00:00",
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "files": 13,
+      "note": "update incremental: 8 código (AST) + 5 docs (2 tentativas de subagente: a 1ª, com 32 nós, foi barrada pelo shrink-guard; a 2ª, 290 nós, mesclou)"
+    }
+  ],
+  "total_input_tokens": 320617,
+  "total_output_tokens": 6000
+}

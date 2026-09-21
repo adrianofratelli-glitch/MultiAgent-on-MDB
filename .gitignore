@@ -13,7 +13,14 @@ frontend/node_modules/
 frontend/dist/
 .DS_Store
 .playwright-mcp/
-graphify-out/
+# graphify: versiona só o essencial (grafo, relatório, manifesto de update, rótulos, custo ~1,9 MB, sem caminhos absolutos).
+# O cache (4 MB) e o HTML (1,5 MB) são regeneráveis; .graphify_python/.graphify_root guardam caminhos desta máquina.
+graphify-out/*
+!graphify-out/graph.json
+!graphify-out/GRAPH_REPORT.md
+!graphify-out/manifest.json
+!graphify-out/cost.json
+!graphify-out/.graphify_labels.json
 backend/__pycache__/
 backend/app/__pycache__/
 backend/tests/__pycache__/
@@ -30,4 +37,7 @@ AGENTS.md CLAUDE.md
 # Instruções locais de ferramenta — não versionar
 CLAUDE.md
 AGENTS.md
-.claude/
+# .claude: regras e settings do projeto ficam no git; permissões pessoais (settings.local.json) não.
+.claude/*
+!.claude/settings.json
+!.claude/rules/
