@@ -119,7 +119,9 @@ No containerization (no Dockerfile/docker-compose) — local dev only, via venv 
 
 ## Estado atual e verificação
 
-`main` está publicado (ver `git log`; ADR-004 documenta a última rodada). Suíte offline verde (402, sem rede), eval dourado **29/29 em modo LIVE**, baterias live dos 4 clientes e de perguntas aleatórias verdes. Não refaça as decisões já registradas nos ADRs 002/003 — elas vieram de medição contra o cluster, não de preferência.
+`main` tem commits LOCAIS ainda **não enviados** (22/09/2026: `eda5960` merge da resiliência, `48dcd86` probes/guarda do eval, `788e3cc` graphify) — o push depende de autorização explícita e o hook `pre-push` roda as suítes live, então o cluster precisa estar ligado. Até `f279bfc`, `origin/main` está em dia; ADR-004 documenta a rodada anterior.
+
+Estado medido em 22/09/2026: suíte offline **408 passed** (padrão novo e com `SUPERVISOR_LEGACY_500=1`), **418 com `CHAOS=1`**, nenhum nome perdido contra `docs/baseline-tests.txt` (402 originais + 6 de `tests/test_isolation.py` + 10 de `tests/test_chaos.py`); bateria de caos **11/11**; `eval_routing.py --live` no banco isolado 100% de rota / 100% de resolução / 0,125 handoff / 762,6 tokens com `embedding_path_live=true`; eval dourado **29/29 em modo LIVE** e baterias live dos 4 clientes verdes (medidos na rodada anterior, no banco da demo). Não refaça as decisões já registradas nos ADRs 002/003 nem a inversão de flags desta rodada — todas vieram de medição, não de preferência.
 
 `git push` roda `.githooks/pre-push` (ruff + pytest offline + `tests/test_live.py`); `SKIP_LIVE=1` pula a parte live. Num clone novo: `git config core.hooksPath .githooks`.
 
