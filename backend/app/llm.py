@@ -3,6 +3,7 @@ from time import monotonic
 
 import anthropic
 
+from . import chaos, observability
 from .budget import TurnBudget, estimate_tokens
 from .config import Settings
 
@@ -93,6 +94,8 @@ class LLMGateway:
             and not settings.demo_mode else None)
 
     async def _request(self, model, system_static, dynamic_context, message, max_tokens, temperature=None):
+        # Antes do primeiro token: é aqui que 429/5xx e timeout do provedor batem de verdade.
+        await chaos.hook("llm", name=model, phase="before_first_token")
         if model in self.settings.grove_openai_models:
             import httpx
             if not self.settings.grove_api_key:
@@ -135,6 +138,9 @@ class LLMGateway:
                 raise
             params.pop("temperature")  # nem todo modelo aceita o parâmetro: repete sem ele em vez de falhar o turno
             response = await self.anthropic_client.messages.create(**params)
+        # Equivalente ao "meio do stream": resposta já saiu do provedor, conexão cai antes de
+        # o turno usar o texto. (Este PoV não usa streaming; o ponto de falha é este.)
+        await chaos.hook("llm", name=model, phase="mid_stream")
         usage = response.usage
         counts = {"input_tokens": int(usage.input_tokens), "output_tokens": int(usage.output_tokens),
                   "cache_read_tokens": int(getattr(usage, "cache_read_input_tokens", 0) or 0),
@@ -182,34 +188,39 @@ class LLMGateway:
                 if blended:
                     record["blended_usd_per_million"] = self.settings.llm_blended_prices[model]
                 retry = False
-                try:
-                    text, counts, known = await self._request(
-                        model, system_static, dynamic_context, user_message,
-                        min(agent.get("max_output_tokens") or agent["max_turn_tokens"], remaining - estimated),
-                        agent.get("temperature"))
-                    record.update(counts, usage_known=known, status="ok" if text else "incomplete")
-                    # Incomplete responses still carry billable usage.
-                    record["estimated_cost_usd"] = call_cost({**record, "status": "ok"}, self.settings.llm_prices, self.settings.llm_blended_prices)
-                    actual = sum(counts.values())
-                    budget.reconcile(agent["agent_key"], estimated, actual if known else estimated)
-                    budget.cache_read_tokens += counts["cache_read_tokens"]
-                    budget.cache_write_tokens += counts["cache_write_tokens"]
-                    if text:
-                        await breaker.record_success()
-                        return text, counts
-                except (anthropic.APIError, httpx.HTTPError, RuntimeError, ValueError, KeyError, IndexError) as exc:
-                    # No error messages/bodies: providers can echo sensitive payloads.
-                    record["error_type"] = type(exc).__name__
-                    status = getattr(exc, "status_code", None)
-                    if isinstance(exc, httpx.HTTPStatusError):
-                        status = exc.response.status_code
-                    retry = status == 429 or (status is not None and status >= 500) or isinstance(
-                        exc, (anthropic.APIConnectionError, httpx.TransportError))
-                    await breaker.record_failure()
-                    # Unknown usage remains reserved conservatively for this failed attempt.
-                finally:
-                    record["latency_ms"] = round((monotonic() - started) * 1000, 2)
-                    budget.llm_calls.append(record)
+                span_attrs = {"llm.model": model, "llm.protocol": protocol,
+                              "agent": agent["agent_key"], "llm.attempt": attempt + 1}
+                with observability.span("llm.call", **span_attrs) as current_span:
+                    try:
+                        text, counts, known = await self._request(
+                            model, system_static, dynamic_context, user_message,
+                            min(agent.get("max_output_tokens") or agent["max_turn_tokens"], remaining - estimated),
+                            agent.get("temperature"))
+                        record.update(counts, usage_known=known, status="ok" if text else "incomplete")
+                        # Incomplete responses still carry billable usage.
+                        record["estimated_cost_usd"] = call_cost({**record, "status": "ok"}, self.settings.llm_prices, self.settings.llm_blended_prices)
+                        actual = sum(counts.values())
+                        budget.reconcile(agent["agent_key"], estimated, actual if known else estimated)
+                        budget.cache_read_tokens += counts["cache_read_tokens"]
+                        budget.cache_write_tokens += counts["cache_write_tokens"]
+                        observability.record_llm_usage(current_span, record)
+                        if text:
+                            await breaker.record_success()
+                            return text, counts
+                    except (anthropic.APIError, httpx.HTTPError, chaos.ChaosProviderError,
+                            RuntimeError, ValueError, KeyError, IndexError) as exc:
+                        # No error messages/bodies: providers can echo sensitive payloads.
+                        record["error_type"] = type(exc).__name__
+                        status = getattr(exc, "status_code", None)
+                        if isinstance(exc, httpx.HTTPStatusError):
+                            status = exc.response.status_code
+                        retry = status == 429 or (status is not None and status >= 500) or isinstance(
+                            exc, (anthropic.APIConnectionError, httpx.TransportError))
+                        await breaker.record_failure()
+                        # Unknown usage remains reserved conservatively for this failed attempt.
+                    finally:
+                        record["latency_ms"] = round((monotonic() - started) * 1000, 2)
+                        budget.llm_calls.append(record)
                 if not retry or attempt == 2:
                     break
                 await asyncio.sleep(.25 * (2 ** attempt))
