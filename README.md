@@ -172,14 +172,21 @@ cd backend && CHAOS=1 ../.venv/bin/python -m pytest tests/test_chaos.py -q
 (`multi_agent_poc_test` / `multiagent_brain_test`, `backend/scripts/isolation.py`) e **recusam
 rodar** se o destino for o banco da demo, a menos que `ALLOW_DEMO_DB_WRITE=1` seja passado. O
 primeiro uso provisiona o banco de teste (seed + índices Search/Vector reais, alguns minutos):
-`cd backend && ../.venv/bin/python scripts/isolation.py`. Como nada disso toca a demo,
+`cd backend && ../.venv/bin/python scripts/isolation.py`. Ele também copia do cérebro da demo,
+**em leitura**, o que só existe no cluster: a configuração medida (`guardrail_policies`,
+`turn_classifier_config`, `scope_classifier_config`) e os probes dos classificadores por
+embedding (`turn_probes` 44, `scope_probes` 214), criando `turn_probes_vs`/`scope_probes_vs` no
+banco de teste — o eval isolado mede o MESMO caminho de embedding da demo, não o fallback por
+palavra-chave. O relatório do eval imprime esse veredito (`embedding_classifiers`), então um
+"100%" nunca fica ambíguo sobre qual caminho foi exercitado. `backend/eval.py` (golden dataset,
+caixa-preta por HTTP) passa pela mesma guarda: recusa o banco da demo e diz como apontar
+servidor e eval para o de teste. Como nada disso toca a demo,
 `restore_demo_fixtures.py` deixou de ser parte do fluxo normal — ficou como recurso de
 emergência, para quem rodar algo fora do padrão (ou com `ALLOW_DEMO_DB_WRITE=1`).
 
 **Limitações conhecidas:** não há streaming (o cenário de falha "no meio do stream" é a queda
 logo depois da resposta do provedor); a concorrência foi medida com 5 requests simultâneos em
-processo único, não é teste de carga; o banco de teste não tem `turn_probes`/`scope_probes`, então
-lá os classificadores por embedding caem no fallback documentado por palavras.
+processo único, não é teste de carga.
 Detalhes e números em [docs/chaos-report.md](docs/chaos-report.md).
 
 ## Eval comparável com o singleagent
@@ -191,7 +198,7 @@ taxa de resolução, handoffs por turno e tokens por turno. Formato documentado 
 
 ```bash
 cd backend && ../.venv/bin/python eval_routing.py           # offline: 100% rota, 100% resolução, 0,125 handoff/turno, 43,5 tokens
-cd backend && ../.venv/bin/python eval_routing.py --live    # Atlas + LLM, banco ISOLADO: 100% / 100% / 0,125 / 855,5 tokens
+cd backend && ../.venv/bin/python eval_routing.py --live    # Atlas + LLM, banco ISOLADO: 100% / 100% / 0,125 / 762,6 tokens
 ```
 
 O dataset é sintético e da mesma família de modelo do agente: serve como regressão, não como

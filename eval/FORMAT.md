@@ -73,7 +73,7 @@ cd backend && ../.venv/bin/python eval_routing.py --json hoje.json --compare ont
 | Modo | Casos avaliados | Acurácia de roteamento | Resolução | Handoffs/turno | Tokens/turno |
 |---|---|---|---|---|---|
 | `demo` (offline) | 21 (3 exigem LLM) | 100,0% | 100,0% | 0,125 | 43,5 |
-| `live` (Atlas + LLM, banco `multi_agent_poc_test`) | 24 | 100,0% | 100,0% | 0,125 | 855,5 |
+| `live` (Atlas + LLM, banco `multi_agent_poc_test`) | 24 | 100,0% | 100,0% | 0,125 | 762,6 |
 
 Três casos (`route-011`, `route-018`, `route-024`) só têm veredito com LLM: dependem do
 orquestrador ou do classificador do guardrail, que em DEMO_MODE não existem.
@@ -82,3 +82,10 @@ O modo `--live` grava dado real (conversa, memória, resgate de pontos) e por is
 de TESTE (`<banco>_test`, `backend/scripts/isolation.py`), nunca no da demo — ele recusa o banco
 da demo sem `ALLOW_DEMO_DB_WRITE=1`. O `summary` do relatório carrega o campo `database` para o
 número nunca ficar órfão de onde foi medido.
+
+O `summary` carrega também `embedding_classifiers`: duas sondas (`scope_classifier` e
+`turn_classifier`) com o veredito cru e o booleano `embedding_path_live`. O banco de teste recebe
+`turn_probes`/`scope_probes` e seus índices vetoriais copiados da demo, então o caminho de
+embedding é o mesmo — mas o relatório PROVA isso em vez de afirmar: em `demo` (offline) o campo
+sai `method: fallback` e o texto avisa, em letras, que os números não cobrem esse caminho. Um
+"100%" sem essa linha não diz qual classificador foi exercitado.

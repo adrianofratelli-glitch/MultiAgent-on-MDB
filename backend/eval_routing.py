@@ -28,10 +28,37 @@ from app.config import Settings  # noqa: E402
 from app.database import DataStore  # noqa: E402
 from app.llm import LLMGateway  # noqa: E402
 from app.orchestration import OrchestrationService  # noqa: E402
+from app import scope_classifier, turn_classifier  # noqa: E402
 from scripts.isolation import open_test_store  # noqa: E402
 from seed import seed  # noqa: E402
 
 DATASET = Path(__file__).resolve().parents[1] / "eval" / "routing_dataset.json"
+
+
+async def embedding_evidence(store: DataStore) -> dict:
+    """Prova, no próprio relatório, se o caminho de EMBEDDING estava vivo nesta medição.
+
+    Sem isso um "100%" é ambíguo: o app cai no fallback por palavra-chave quando os probes ou o
+    índice vetorial não existem (DEMO_MODE, banco novo), e o número não distingue os dois casos.
+    Duas sondas baratas, uma por classificador, com o veredito cru.
+    """
+    evidence: dict = {}
+    try:
+        scope = await scope_classifier.classify(store, "qual a temperatura em são paulo hoje?")
+        evidence["scope_classifier"] = {"method": (scope or {}).get("method"), "scope": (scope or {}).get("scope"),
+                                        "error": (scope or {}).get("error")}
+    except Exception as exc:  # noqa: BLE001 — a sonda nunca derruba o eval
+        evidence["scope_classifier"] = {"method": None, "error": type(exc).__name__}
+    try:
+        turn = await turn_classifier.classify(store, "quantos pontos eu tenho?")
+        evidence["turn_classifier"] = {"method": (turn or {}).get("method"), "personal": (turn or {}).get("personal"),
+                                       "error": (turn or {}).get("error")}
+    except Exception as exc:  # noqa: BLE001
+        evidence["turn_classifier"] = {"method": None, "error": type(exc).__name__}
+    evidence["embedding_path_live"] = all(
+        item.get("method") == "vector" and not item.get("error") for item in
+        (evidence["scope_classifier"], evidence["turn_classifier"]))
+    return evidence
 
 
 async def _customers(store: DataStore) -> dict:
@@ -110,6 +137,7 @@ async def run(live: bool) -> dict:
             "latency_ms": round((perf_counter() - started) * 1000, 1),
         })
 
+    evidence = await embedding_evidence(store)
     await store.close()
     # Casos marcados `requires_llm` não têm veredito honesto em DEMO_MODE (sem classificador
     # nem orquestrador LLM): entram na contagem, mas fora da acurácia do modo offline.
@@ -125,7 +153,8 @@ async def run(live: bool) -> dict:
         "min_handoffs_respected": round(mean(row["min_handoffs_ok"] for row in rows), 4),
         "avg_tokens": round(mean(row["tokens"] for row in rows), 1),
         "degraded_turns": sum(row["degraded"] for row in rows),
-        "database": settings.mongodb_db,
+        "database": settings.mongodb_db if live else "memória (DEMO_MODE, nenhum banco tocado)",
+        "embedding_classifiers": evidence,
         "synthetic": dataset["synthetic"],
         "limitation": dataset["limitation"],
     }
@@ -142,6 +171,13 @@ def report(result: dict, compare: dict | None) -> None:
     print(f"  handoffs por turno (média)  {summary['avg_handoffs']}")
     print(f"  tokens por turno (média) .. {summary['avg_tokens']}")
     print(f"  turnos degradados ......... {summary['degraded_turns']}")
+    evidence = summary.get("embedding_classifiers", {})
+    if evidence.get("embedding_path_live"):
+        print("  classificadores por embedding: VIVOS (escopo e turno responderam por $vectorSearch)")
+    else:
+        print("  classificadores por embedding: NÃO medidos neste modo — o app usou o fallback por")
+        print(f"     palavra-chave. Vereditos crus: {evidence or 'indisponível'}")
+        print("     Logo, os números acima NÃO cobrem o caminho de embedding.")
     misses = [row for row in result["rows"]
               if (not row["route_ok"] or not row["resolved"])
               and (summary["mode"] == "live" or not row["requires_llm"])]

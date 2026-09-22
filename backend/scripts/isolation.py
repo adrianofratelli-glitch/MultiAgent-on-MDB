@@ -11,9 +11,12 @@ para o banco da demo, o script RECUSA rodar, a menos que `ALLOW_DEMO_DB_WRITE=1`
 explicitamente (escape hatch consciente, nunca default).
 
 O banco de teste nasce vazio: `ensure_seeded` roda o seed com os índices Search/Vector reais e
-espera ficarem READY (primeira execução leva minutos; as seguintes são instantâneas). Ele NÃO
-copia `turn_probes`/`scope_probes` — sem esses índices os classificadores por embedding não dão
-veredito e o app cai no comportamento documentado por palavras, que é fail-open de propósito.
+espera ficarem READY (primeira execução leva minutos; as seguintes são instantâneas). Ele também
+copia do cérebro da DEMO, em leitura, o que vive só no cluster e não está no git: a configuração
+medida (`guardrail_policies`, `turn_classifier_config`, `scope_classifier_config`) E os probes
+dos classificadores por embedding (`turn_probes`, `scope_probes`), criando os índices vetoriais
+`turn_probes_vs`/`scope_probes_vs` no banco de teste. Sem isso o eval isolado mediria só o
+fallback por palavra-chave, e não o mesmo caminho de embedding que a demo usa.
 """
 
 from __future__ import annotations
@@ -31,6 +34,9 @@ from app.database import DataStore  # noqa: E402
 # Documentos de configuração MEDIDOS que vivem só no cluster (ver CLAUDE.md). São copiados do
 # cérebro da demo para o de teste em modo leitura, para o teste medir o mesmo comportamento.
 BRAIN_CONFIG_COLLECTIONS = ("guardrail_policies", "turn_classifier_config", "scope_classifier_config")
+# Probes dos classificadores por embedding: copiados COM o índice vetorial, senão
+# `classify()` não tem vizinho para medir e o turno cai no fallback por palavra.
+BRAIN_PROBE_COLLECTIONS = ("turn_probes", "scope_probes")
 INDEXED_COLLECTIONS = ("products_catalog", "kb_articles", "customer_memory", "semantic_cache",
                        "short_term_memory", "guardrail_denylist", "long_term_memory")
 
@@ -56,7 +62,7 @@ def test_settings(**overrides) -> Settings:
     return base.model_copy(update={"mongodb_db": main_db, "mongodb_brain_db": brain_db, **overrides})
 
 
-def guard(settings: Settings, *, what: str) -> Settings:
+def guard(settings: Settings, *, what: str, hint: str = "") -> Settings:
     """Recusa rodar contra o banco da demo. Retorna as settings quando o destino é seguro."""
     demo = get_settings()
     hits = [name for name, value in (("MONGODB_DB", settings.mongodb_db),
@@ -73,29 +79,41 @@ def guard(settings: Settings, *, what: str) -> Settings:
     raise DemoDatabaseRefused(
         f"\n[isolamento] RECUSADO: {what} escreveria no banco da demo ({', '.join(hits)} = "
         f"{settings.mongodb_db}/{settings.mongodb_brain_db}).\n"
-        f"             Use os bancos de teste ({main_db}/{brain_db}) — é o padrão destes scripts —\n"
-        f"             ou passe ALLOW_DEMO_DB_WRITE=1 se for MESMO para escrever na demo.\n")
+        + (f"             {hint}\n" if hint
+           else f"             Use os bancos de teste ({main_db}/{brain_db}) — é o padrão destes scripts —\n")
+        + "             ou passe ALLOW_DEMO_DB_WRITE=1 se for MESMO para escrever na demo.\n")
+
+
+async def _probe_indexes(store: DataStore) -> list[str]:
+    """Cria `turn_probes_vs` e `scope_probes_vs` no cérebro de TESTE (idempotente)."""
+    import seed_scope_probes
+    import seed_turn_probes
+
+    messages = []
+    for module in (seed_turn_probes, seed_scope_probes):
+        messages.append(f"índice de probes: {await module.create_index(store)}")
+    return messages
 
 
 async def _indexes_ready(store: DataStore, timeout_s: float = 900.0) -> str:
-    """Espera os índices Search/Vector do banco de teste ficarem READY."""
+    """Espera os índices Search/Vector do banco de teste ficarem READY (inclui os do cérebro)."""
     deadline = asyncio.get_event_loop().time() + timeout_s
-    pending = list(INDEXED_COLLECTIONS)
+    pending = [(name, False) for name in INDEXED_COLLECTIONS] + [(name, True) for name in BRAIN_PROBE_COLLECTIONS]
     while pending and asyncio.get_event_loop().time() < deadline:
-        still: list[str] = []
-        for name in pending:
+        still: list[tuple[str, bool]] = []
+        for name, brain in pending:
             try:
-                cursor = await store._collection(name).list_search_indexes()
+                cursor = await store._collection(name, brain).list_search_indexes()
                 rows = await cursor.to_list(None)
             except Exception:  # noqa: BLE001 — collection ainda não existe
                 rows = []
             if not rows or any(row.get("status") != "READY" for row in rows):
-                still.append(name)
+                still.append((name, brain))
         if not still:
             return "todos READY"
         pending = still
         await asyncio.sleep(10)
-    return f"ainda construindo: {', '.join(pending)}" if pending else "todos READY"
+    return f"ainda construindo: {', '.join(name for name, _ in pending)}" if pending else "todos READY"
 
 
 async def ensure_seeded(store: DataStore, *, wait_indexes: bool = True) -> list[str]:
@@ -120,6 +138,16 @@ async def ensure_seeded(store: DataStore, *, wait_indexes: bool = True) -> list[
             await target[name].delete_many({})
             await target[name].insert_many(documents)
             messages.append(f"config medida copiada: {name} ({len(documents)} doc)")
+        for name in BRAIN_PROBE_COLLECTIONS:
+            # Probes são imutáveis na prática (frases medidas); copia só o que falta, para não
+            # recriar documento e forçar o índice autoEmbed a reindexar tudo a cada execução.
+            existing = {doc.get("phrase") for doc in await target[name].find({}, {"phrase": 1}).to_list(length=None)}
+            documents = [doc for doc in await source[name].find({}).to_list(length=None)
+                         if doc.get("phrase") not in existing]
+            if documents:
+                await target[name].insert_many(documents)
+            messages.append(f"probes copiados: {name} (+{len(documents)}, total {len(existing) + len(documents)})")
+        messages += await _probe_indexes(store)
 
     if wait_indexes:
         messages.append(f"índices Search/Vector: {await _indexes_ready(store)}")

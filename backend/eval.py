@@ -2,6 +2,21 @@
 mede GoalSuccessRate por caso e grava o resultado como documento em eval_runs — histórico de
 qualidade fica no mesmo banco de dados, consultável como qualquer outro dado operacional.
 
+NÃO é redundante com `eval_routing.py`: aqui é caixa-preta por HTTP contra um servidor de
+verdade, com verificação de EFEITO (status de pedido persistido, débito de pontos conferido,
+chamado aberto) e histórico em `eval_runs`. O `eval_routing.py` mede roteamento/resolução em
+processo, com outro dataset. Os dois ficam.
+
+Como este modo escreve dado real (o turno grava, e o relatório vai para `eval_runs`), ele segue
+a mesma proteção dos outros scripts (`scripts/isolation.py`): **recusa rodar contra o banco da
+demo**. Suba o servidor apontado para o banco de teste e rode o eval com o mesmo banco:
+
+    cd backend && MONGODB_DB=multi_agent_poc_test MONGODB_BRAIN_DB=multiagent_brain_test python run.py
+    cd backend && MONGODB_DB=multi_agent_poc_test MONGODB_BRAIN_DB=multiagent_brain_test python eval.py
+
+Para medir a demo mesmo (gastando estado dela), passe `ALLOW_DEMO_DB_WRITE=1` conscientemente.
+`--offline` usa fixtures em memória e não toca banco nenhum, então não passa pela guarda.
+
 Uso: python eval.py [URL]
 """
 
@@ -17,6 +32,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from app.config import Settings, get_settings  # noqa: E402
 from app.database import DataStore, utcnow  # noqa: E402
 from app.seed_data import EVAL_CASES  # noqa: E402
+from scripts.isolation import guard  # noqa: E402
 
 
 def grade_case(case: dict, body: dict) -> dict:
@@ -126,6 +142,13 @@ async def run(args):
     settings = Settings(_env_file=None, demo_mode=True) if args.offline else get_settings()
     if not args.offline and settings.use_memory_store:
         raise ValueError("Use --offline para DEMO_MODE; eval externo exige o mesmo Atlas do servidor")
+    if not args.offline:
+        # O turno grava de verdade e o relatório vai para eval_runs: mesma guarda dos demais
+        # scripts. O banco tem de ser o MESMO do servidor sob teste, então aqui não se troca o
+        # destino automaticamente — recusa-se o da demo e diz como apontar os dois para o teste.
+        guard(settings, what="eval.py (modo live, grava o turno e eval_runs)",
+              hint=("Suba o servidor E rode o eval com MONGODB_DB=multi_agent_poc_test "
+                    "MONGODB_BRAIN_DB=multiagent_brain_test (o eval precisa do MESMO banco do servidor),"))
     store = DataStore(settings)
     await store.connect()
     results = []

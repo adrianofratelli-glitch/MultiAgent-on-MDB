@@ -42,7 +42,7 @@ cd backend && pytest -q                                  # unit tests, full suit
 cd backend && pytest tests/test_router.py -q              # single file
 cd backend && pytest tests/test_router.py::test_name -q   # single test
 python backend/tests/smoke.py http://127.0.0.1:8031        # black-box smoke test against a running server; nonzero exit on failure
-python backend/eval.py http://127.0.0.1:8031               # golden-dataset eval (seed_data.py:EVAL_CASES), writes pass/fail history to eval_runs
+python backend/eval.py http://127.0.0.1:8031               # golden-dataset eval (seed_data.py:EVAL_CASES), writes pass/fail history to eval_runs. Live mode REFUSES the demo database (scripts/isolation.py guard): point both server and eval at MONGODB_DB=multi_agent_poc_test, or pass ALLOW_DEMO_DB_WRITE=1 on purpose. `--offline` touches no database
 cd backend && python calibrate_thresholds.py               # measures the denylist score band against labeled probes (--apply writes vector_threshold to guardrail_policies)
 cd backend && python calibrate_thresholds.py --only turn --apply   # one target only; --allow-errors (turn only) writes the lowest-error threshold and lists the probes that miss
 cd backend && python seed_turn_probes.py                   # explicit step: creates turn_probes + its vector index in the brain DB; deliberately NOT part of seed.py
@@ -123,7 +123,7 @@ No containerization (no Dockerfile/docker-compose) — local dev only, via venv 
 
 `git push` roda `.githooks/pre-push` (ruff + pytest offline + `tests/test_live.py`); `SKIP_LIVE=1` pula a parte live. Num clone novo: `git config core.hooksPath .githooks`.
 
-Os scripts que gastam estado (`crash_resume`, `eval_routing --live`) rodam nos bancos isolados `*_test` e não tocam a demo — `python backend/restore_demo_fixtures.py` ficou como recurso de emergência (ex.: alguém rodou com `ALLOW_DEMO_DB_WRITE=1`, ou `backend/eval.py`, que continua usando o banco da demo). Depois de mexer em `DEMO_SCENARIOS`: `python backend/sync_demo_scenarios.py`.
+Os scripts que gastam estado (`crash_resume`, `eval_routing --live`, `eval.py` em modo live) rodam nos bancos isolados `*_test` e não tocam a demo — `python backend/restore_demo_fixtures.py` ficou como recurso de emergência (ex.: alguém rodou com `ALLOW_DEMO_DB_WRITE=1`). Depois de mexer em `DEMO_SCENARIOS`: `python backend/sync_demo_scenarios.py`.
 
 **O que vive no cluster Atlas (NÃO está no git — não refaça, verifique):** brain DB `multiagent_brain`: `turn_probes` (44) + índice `turn_probes_vs` + `turn_classifier_config` (limiar 0,7162); `scope_probes` (214) + índice `scope_probes_vs` + `scope_classifier_config` (margens 0,04/0,04/0,04); `guardrail_policies.vector_block_threshold` = 0,8814; `demo_scenarios` (53 roteiros, via `sync_demo_scenarios.py`). Main DB: `customer_memory` legado migrado por `migrate_legacy_memory.py` (aditivo; teto de R$ 350 removido). Adicionar probes reindexa de forma assíncrona (minutos); recalibre só depois de o probe novo ser o vizinho nº 1 dele mesmo. **O cluster precisa estar ligado**: o hook `pre-push` e todas as suítes live dependem dele (já esteve pausado uma vez e o push falhou).
 
@@ -158,11 +158,15 @@ resolução e handoffs; formato em `eval/FORMAT.md` para o singleagent comparar.
 escrevem dado real e por isso usam `multi_agent_poc_test`/`multiagent_brain_test` no MESMO
 cluster, nunca os bancos da demo; recusam rodar contra a demo sem `ALLOW_DEMO_DB_WRITE=1`.
 Provisionar/repetir: `cd backend && ../.venv/bin/python scripts/isolation.py` (seed + índices
-Search/Vector reais, minutos na primeira vez; copia `guardrail_policies` e os `*_classifier_config`
-do cérebro da demo em LEITURA). O banco de teste não tem `turn_probes`/`scope_probes`, então lá os
-classificadores por embedding caem no fallback por palavras. Como nada mais toca a demo,
-`restore_demo_fixtures.py` saiu do fluxo normal: é recurso de emergência para quem rodar fora do
-padrão. Atritos com o
+Search/Vector reais, minutos na primeira vez). O provisionamento copia do cérebro da demo em
+LEITURA tudo o que só vive no cluster: `guardrail_policies`, os `*_classifier_config` E os probes
+(`turn_probes` 44, `scope_probes` 214), criando `turn_probes_vs`/`scope_probes_vs` no banco de
+teste — então a medição isolada exercita o MESMO caminho de embedding da demo, e o relatório do
+eval imprime `embedding_classifiers` provando isso (em DEMO_MODE ele diz, em letras, que mediu só
+o fallback por palavra-chave). `backend/eval.py` NÃO é redundante com `eval_routing.py` (caixa-preta
+por HTTP, verificação de efeito, histórico em `eval_runs`) e passa pela mesma guarda: recusa o
+banco da demo e instrui a subir servidor e eval com `MONGODB_DB=multi_agent_poc_test`. Como nada
+mais toca a demo, `restore_demo_fixtures.py` saiu do fluxo normal: é recurso de emergência. Atritos com o
 `_shared` em `docs/shared-feedback.md`. **Sem nenhuma dessas flags o comportamento é o de antes**
 e a suíte offline continua verde nome a nome contra `docs/baseline-tests.txt` (402 originais + 6
 de `tests/test_isolation.py`; com `CHAOS=1`, +10 de `tests/test_chaos.py`), tanto no padrão novo

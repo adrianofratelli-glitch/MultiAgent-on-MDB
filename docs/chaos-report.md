@@ -58,11 +58,12 @@ Nenhum dos três exigiu mudança de arquitetura; todos estão cobertos por teste
 * `crash_resume` precisa de Atlas real (`LIVE=1`); sem cluster ele se declara `skipped`, nunca
   PASS. Sobe o backend numa porta própria (`CRASH_RESUME_PORT`, default 8041), sem chave de LLM
   (custo zero em tokens) e apaga a conversa que criou.
-* **Isolamento de banco:** `crash_resume` e `eval_routing.py --live` escrevem nos bancos de teste
-  (`<banco>_test`, `backend/scripts/isolation.py`) e recusam o banco da demo sem
-  `ALLOW_DEMO_DB_WRITE=1`. O banco de teste não recebe `turn_probes`/`scope_probes`: lá os
-  classificadores por embedding não dão veredito e o app usa o fallback por palavras — é o
-  comportamento fail-open documentado, mas significa que o eval isolado NÃO mede essa camada.
+* **Isolamento de banco:** `crash_resume`, `eval_routing.py --live` e `eval.py` (modo live)
+  escrevem nos bancos de teste (`<banco>_test`, `backend/scripts/isolation.py`) e recusam o banco
+  da demo sem `ALLOW_DEMO_DB_WRITE=1`. O provisionamento copia da demo, em leitura, a configuração
+  medida E os probes dos classificadores (`turn_probes` 44, `scope_probes` 214) com seus índices
+  vetoriais, então a medição isolada exercita o mesmo caminho de embedding; o relatório do eval
+  imprime o veredito (`embedding_classifiers`) em vez de deixar isso implícito.
 * A degradação graciosa é o **padrão** desde 22/09/2026 — não depende de flag. `SUPERVISOR_LEGACY_500=1`
   devolve o comportamento antigo (falha sobe para o handler global, 500 com `request_id`), e o
   cenário `legacy_500_flag` existe justamente para provar que essa flag ainda funciona.
