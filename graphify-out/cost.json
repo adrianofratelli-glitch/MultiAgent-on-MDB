@@ -50,8 +50,14 @@
       "output_tokens": 0,
       "files": 13,
       "note": "update incremental: 8 código (AST) + 5 docs (2 tentativas de subagente: a 1ª, com 32 nós, foi barrada pelo shrink-guard; a 2ª, 290 nós, mesclou)"
+    },
+    {
+      "date": "2026-09-22T12:04:50.205052+00:00",
+      "input_tokens": 62000,
+      "output_tokens": 26000,
+      "files": 26
     }
   ],
-  "total_input_tokens": 320617,
-  "total_output_tokens": 6000
+  "total_input_tokens": 382617,
+  "total_output_tokens": 32000
 }
