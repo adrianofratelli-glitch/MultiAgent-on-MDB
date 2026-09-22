@@ -132,7 +132,7 @@ async def scenario_tool_timeout() -> Verdict:
     assertion = ("turno termina em < 5s com resposta de degradação explícita, sem exceção; "
                  "a timeline registra o agente degradado")
     with env(CHAOS=1, CHAOS_SCENARIO="timeout", CHAOS_TARGET="tool:orders", CHAOS_DELAY=20,
-             SUPERVISOR_STRICT=1, AGENT_TIMEOUT_SECONDS=1, TOOL_TIMEOUT_SECONDS=1):
+             AGENT_TIMEOUT_SECONDS=1, TOOL_TIMEOUT_SECONDS=1):
         _, service = await world()
         started = perf_counter()
         response = await service.run_turn("onde está meu pedido?", ANA, None)
@@ -149,7 +149,7 @@ async def scenario_agent_hang() -> Verdict:
     assertion = ("o supervisor interrompe em ~AGENT_TIMEOUT_SECONDS (< 5s) mesmo com o agente "
                  "pendurado por 60s, e responde com estado explícito")
     with env(CHAOS=1, CHAOS_SCENARIO="hang", CHAOS_TARGET="agent:", CHAOS_DELAY=60,
-             SUPERVISOR_STRICT=1, AGENT_TIMEOUT_SECONDS=1):
+             AGENT_TIMEOUT_SECONDS=1):
         _, service = await world()
         started = perf_counter()
         response = await service.run_turn("onde está meu pedido?", ANA, None)
@@ -161,7 +161,7 @@ async def scenario_agent_hang() -> Verdict:
 
 async def _llm_failure(phase: str, status: int) -> tuple[object, float]:
     with env(CHAOS=1, CHAOS_SCENARIO="status", CHAOS_STATUS=status, CHAOS_TARGET="llm:",
-             CHAOS_PHASE=phase, SUPERVISOR_STRICT=1, AGENT_TIMEOUT_SECONDS=30):
+             CHAOS_PHASE=phase, AGENT_TIMEOUT_SECONDS=30):
         _, service = await world(with_llm=True)
         started = perf_counter()
         response = await service.run_turn("onde está meu pedido?", ANA, None)
@@ -198,7 +198,7 @@ async def scenario_llm_error_between_handoffs() -> Verdict:
     assertion = ("handoff não é duplicado, o turno termina com estado explícito e o cliente não "
                  "recebe meia resposta em silêncio")
     with env(CHAOS=1, CHAOS_SCENARIO="status", CHAOS_STATUS=503, CHAOS_TARGET="handoff:",
-             CHAOS_PHASE="between_handoffs", SUPERVISOR_STRICT=1, AGENT_TIMEOUT_SECONDS=30):
+             CHAOS_PHASE="between_handoffs", AGENT_TIMEOUT_SECONDS=30):
         store, service = await world()
         started = perf_counter()
         response = await service.run_turn("quero trocar o produto do meu pedido e saber a entrega", ANA, None)
@@ -214,7 +214,7 @@ async def scenario_tool_malformed_payload() -> Verdict:
     """A tool responde, mas com payload vazio/inesperado (índice fora do ar, driver estranho)."""
     assertion = ("nenhuma exceção escapa e o cliente recebe uma resposta honesta de 'sem dado', "
                  "nunca um dado inventado nem um 500")
-    with env(CHAOS=1, CHAOS_SCENARIO="malformed", CHAOS_TARGET="tool:orders", SUPERVISOR_STRICT=1):
+    with env(CHAOS=1, CHAOS_SCENARIO="malformed", CHAOS_TARGET="tool:orders"):
         _, service = await world()
         started = perf_counter()
         response = await service.run_turn("onde está meu pedido?", ANA, None)
@@ -230,7 +230,7 @@ async def scenario_tool_circuit_breaker() -> Verdict:
     assertion = ("depois de 4 falhas consecutivas a tool entra em circuito aberto e as chamadas "
                  "seguintes são curto-circuitadas (ToolOpenCircuit), sem derrubar o turno")
     with env(CHAOS=1, CHAOS_SCENARIO="status", CHAOS_STATUS=500, CHAOS_TARGET="tool:orders",
-             TOOL_BREAKER=1, SUPERVISOR_STRICT=1, AGENT_TIMEOUT_SECONDS=30):
+             AGENT_TIMEOUT_SECONDS=30):
         store, service = await world()
         started = perf_counter()
         for _ in range(5):
@@ -247,7 +247,7 @@ async def scenario_loop_guard() -> Verdict:
     """Supervisor girando: mesmo agente e mesma intenção além do limite."""
     assertion = ("o supervisor corta a cadeia e escala para humano com motivo explícito "
                  "(timeline com reason=loop_guard), em vez de gastar o budget girando")
-    with env(SUPERVISOR_STRICT=1, LOOP_GUARD_REPEATS=0, AGENT_TIMEOUT_SECONDS=30, CHAOS=None):
+    with env(LOOP_GUARD_REPEATS=0, AGENT_TIMEOUT_SECONDS=30, CHAOS=None):
         _, service = await world()
         started = perf_counter()
         response = await service.run_turn("onde está meu pedido?", ANA, None)
@@ -259,11 +259,29 @@ async def scenario_loop_guard() -> Verdict:
                    elapsed)
 
 
+async def scenario_legacy_500_flag() -> Verdict:
+    """Quem precisa do comportamento antigo ainda o tem — e ele é MESMO o antigo."""
+    assertion = ("com SUPERVISOR_LEGACY_500=1 a falha do agente volta a subir como exceção "
+                 "(vira 500 no handler global), provando que o default novo é o que degrada")
+    with env(CHAOS=1, CHAOS_SCENARIO="status", CHAOS_STATUS=500, CHAOS_TARGET="tool:orders",
+             SUPERVISOR_LEGACY_500=1, AGENT_TIMEOUT_SECONDS=30):
+        _, service = await world()
+        started = perf_counter()
+        raised = ""
+        try:
+            await service.run_turn("onde está meu pedido?", ANA, None)
+        except Exception as exc:  # noqa: BLE001 — é exatamente o que o modo legado faz
+            raised = type(exc).__name__
+        elapsed = perf_counter() - started
+    return Verdict("legacy_500_flag", assertion, raised == "ChaosProviderError",
+                   f"excecao_propagada={raised or 'nenhuma'}", elapsed)
+
+
 async def scenario_concurrent_same_conversation() -> Verdict:
     """5 requests simultâneos na MESMA conversation_id."""
     assertion = ("nenhum turno se perde nem duplica: a conversa guarda 2 mensagens por turno, "
                  "existe UM documento de conversa e nenhuma exceção escapa")
-    with env(SUPERVISOR_STRICT=1, AGENT_TIMEOUT_SECONDS=30, CHAOS=None):
+    with env(AGENT_TIMEOUT_SECONDS=30, CHAOS=None):
         store, service = await world()
         first = await service.run_turn("onde está meu pedido?", ANA, None)
         conversation_id = first.conversation_id
@@ -304,6 +322,7 @@ SCENARIOS = {
     "tool_malformed_payload": scenario_tool_malformed_payload,
     "tool_circuit_breaker": scenario_tool_circuit_breaker,
     "loop_guard": scenario_loop_guard,
+    "legacy_500_flag": scenario_legacy_500_flag,
     "concurrent_same_conversation": scenario_concurrent_same_conversation,
     "crash_resume": scenario_crash_resume,
 }

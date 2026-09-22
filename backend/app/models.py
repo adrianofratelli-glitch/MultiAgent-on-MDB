@@ -84,8 +84,8 @@ class ChatResponse(BaseModel):
     langfuse_trace_url: str | None = None
     llm_calls: list[dict[str, Any]] = Field(default_factory=list)
     economics: dict[str, Any] = Field(default_factory=dict)
-    # Turno que terminou em degradação graciosa (SUPERVISOR_STRICT=1). Default False: sem a flag
-    # nenhuma resposta muda de forma — o campo só aparece preenchido quando algo realmente falhou.
+    # Turno que terminou em degradação graciosa (padrão do supervisor). Default False: o campo
+    # só aparece preenchido quando algo realmente falhou, então nenhuma resposta normal muda.
     degraded: bool = False
     degraded_reason: str | None = None
 

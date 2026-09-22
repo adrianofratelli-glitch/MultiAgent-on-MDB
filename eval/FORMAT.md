@@ -64,7 +64,7 @@ delta campo a campo. `summary` carrega `mode` (`demo`/`live`), `scored_cases`,
 
 ```bash
 cd backend && ../.venv/bin/python eval_routing.py                 # offline (DEMO_MODE)
-cd backend && ../.venv/bin/python eval_routing.py --live          # Atlas + LLM reais
+cd backend && ../.venv/bin/python eval_routing.py --live          # Atlas + LLM reais, banco ISOLADO
 cd backend && ../.venv/bin/python eval_routing.py --json hoje.json --compare ontem.json
 ```
 
@@ -73,7 +73,12 @@ cd backend && ../.venv/bin/python eval_routing.py --json hoje.json --compare ont
 | Modo | Casos avaliados | Acurácia de roteamento | Resolução | Handoffs/turno | Tokens/turno |
 |---|---|---|---|---|---|
 | `demo` (offline) | 21 (3 exigem LLM) | 100,0% | 100,0% | 0,125 | 43,5 |
-| `live` (Atlas + LLM) | 24 | 100,0% | 100,0% | 0,125 | 853,8 |
+| `live` (Atlas + LLM, banco `multi_agent_poc_test`) | 24 | 100,0% | 100,0% | 0,125 | 855,5 |
 
 Três casos (`route-011`, `route-018`, `route-024`) só têm veredito com LLM: dependem do
 orquestrador ou do classificador do guardrail, que em DEMO_MODE não existem.
+
+O modo `--live` grava dado real (conversa, memória, resgate de pontos) e por isso roda nos bancos
+de TESTE (`<banco>_test`, `backend/scripts/isolation.py`), nunca no da demo — ele recusa o banco
+da demo sem `ALLOW_DEMO_DB_WRITE=1`. O `summary` do relatório carrega o campo `database` para o
+número nunca ficar órfão de onde foi medido.

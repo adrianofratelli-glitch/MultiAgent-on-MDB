@@ -65,7 +65,7 @@ A demo escreve de verdade (fatos, episódios, cache do cliente). O botão **"Rei
 
 ```bash
 cd backend
-pytest -q                       # unitários (402, sem rede)
+pytest -q                       # unitários (408, sem rede)
 python tests/smoke.py <url>     # caixa-preta
 python eval.py <url>            # golden dataset, resultados em eval_runs
 
@@ -127,22 +127,29 @@ conv-8b3ca34a297a         20     2       0    0.00000  agent [order_agent] 3ms  
 |---|---|---|
 | `TRACE_SINK` | `off` | tracing OpenTelemetry: `console`, `phoenix` ou `atlas` (spans viram documentos) |
 | `TRACE_MASK_PII` | forçado a `1` | com qualquer sink ligado, o conteúdo dos spans é mascarado — não é opcional |
-| `SUPERVISOR_STRICT` | `0` | timeout por agente, detector de laço e degradação graciosa (nunca 500 mudo) |
-| `AGENT_TIMEOUT_SECONDS` | `45` | teto por hop de agente (só com `SUPERVISOR_STRICT=1`) |
+| `SUPERVISOR_LEGACY_500` | `0` | **volta** o comportamento antigo: falha de agente sobe como 500. A degradação graciosa é o padrão |
+| `AGENT_TIMEOUT_SECONDS` | `45` | teto por hop de agente (sempre ativo) |
 | `LOOP_GUARD_REPEATS` | `2` | repetições de (agente, intenção) antes de escalar para humano |
 | `TOOL_TIMEOUT_SECONDS` | `0` (desligado) | teto por chamada de tool, inclusive fora do hop de agente |
-| `TOOL_BREAKER` | `0` | circuit breaker por tool (4 falhas consecutivas abrem por 30s) |
+| `TOOL_BREAKER` | `1` (ligado) | circuit breaker por tool: 4 falhas **consecutivas** abrem por 30s; `0` desliga |
+| `MONGODB_TEST_DB` / `MONGODB_TEST_BRAIN_DB` | `<banco>_test` | bancos isolados usados pelos scripts que escrevem dado real |
+| `ALLOW_DEMO_DB_WRITE` | `0` | escape hatch: deixa esses scripts escreverem no banco da demo |
 | `GUARDRAILS_EDGE` | `0` | `mask_pii` nos logs e `validate_output` (`max_repairs=0`) na resposta, via `_shared` |
 | `CHAOS` | `0` | habilita os pontos de injeção de falha (`CHAOS_SCENARIO`, `CHAOS_TARGET`, `CHAOS_PHASE`, `CHAOS_STATUS`, `CHAOS_DELAY`, `CHAOS_COUNT`) |
 
 O gateway de LLM (`app/llm.py`) já tinha retry com backoff, fallback de modelo e circuit breaker
 por endpoint — isso continua ligado por padrão, como sempre esteve.
 
+**A PoV é resiliente por padrão:** degradação graciosa do supervisor, timeout por agente,
+detector de laço e circuit breaker por tool valem sem ligar nada. As flags acima existem para
+DESLIGAR (`SUPERVISOR_LEGACY_500`, `TOOL_BREAKER=0`) ou para ajustar limite — não para ligar a
+resiliência. A suíte offline continua 402/402 idêntica ao baseline nos dois modos.
+
 ## Resiliência (medida, não afirmada)
 
 `backend/scripts/chaos_suite.py` é o PoV tentando se quebrar sozinho: 10 cenários de falha
 injetada no caminho real, cada um com uma assertion explícita do que "resiliente" significa ali.
-Última execução: **10/10**. Os mesmos cenários rodam como regressão em `tests/test_chaos.py`.
+Última execução: **11/11**. Os mesmos cenários rodam como regressão em `tests/test_chaos.py`.
 
 ```bash
 cd backend && CHAOS=1 ../.venv/bin/python scripts/chaos_suite.py          # bateria toda
@@ -160,9 +167,19 @@ cd backend && CHAOS=1 ../.venv/bin/python -m pytest tests/test_chaos.py -q
 * O cenário de "agente travado" não interrompia nada — medir isso foi o que mostrou que o ponto
   de falha precisava estar dentro da corrotina cronometrada.
 
+**Isolamento de banco:** os cenários que escrevem dado real (`crash_resume`) e o
+`eval_routing.py --live` usam bancos de teste isolados no mesmo cluster
+(`multi_agent_poc_test` / `multiagent_brain_test`, `backend/scripts/isolation.py`) e **recusam
+rodar** se o destino for o banco da demo, a menos que `ALLOW_DEMO_DB_WRITE=1` seja passado. O
+primeiro uso provisiona o banco de teste (seed + índices Search/Vector reais, alguns minutos):
+`cd backend && ../.venv/bin/python scripts/isolation.py`. Como nada disso toca a demo,
+`restore_demo_fixtures.py` deixou de ser parte do fluxo normal — ficou como recurso de
+emergência, para quem rodar algo fora do padrão (ou com `ALLOW_DEMO_DB_WRITE=1`).
+
 **Limitações conhecidas:** não há streaming (o cenário de falha "no meio do stream" é a queda
-logo depois da resposta do provedor); a degradação graciosa é opt-in (`SUPERVISOR_STRICT=1`);
-a concorrência foi medida com 5 requests simultâneos em processo único, não é teste de carga.
+logo depois da resposta do provedor); a concorrência foi medida com 5 requests simultâneos em
+processo único, não é teste de carga; o banco de teste não tem `turn_probes`/`scope_probes`, então
+lá os classificadores por embedding caem no fallback documentado por palavras.
 Detalhes e números em [docs/chaos-report.md](docs/chaos-report.md).
 
 ## Eval comparável com o singleagent
@@ -174,7 +191,7 @@ taxa de resolução, handoffs por turno e tokens por turno. Formato documentado 
 
 ```bash
 cd backend && ../.venv/bin/python eval_routing.py           # offline: 100% rota, 100% resolução, 0,125 handoff/turno, 43,5 tokens
-cd backend && ../.venv/bin/python eval_routing.py --live    # Atlas + LLM: 100% / 100% / 0,125 / 853,8 tokens
+cd backend && ../.venv/bin/python eval_routing.py --live    # Atlas + LLM, banco ISOLADO: 100% / 100% / 0,125 / 855,5 tokens
 ```
 
 O dataset é sintético e da mesma família de modelo do agente: serve como regressão, não como

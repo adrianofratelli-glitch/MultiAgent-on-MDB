@@ -5,6 +5,10 @@ e permitir comparação direta — lá o roteamento é trivial, mas resolução 
 
     cd backend && ../.venv/bin/python eval_routing.py                    # DEMO_MODE, sem rede
     cd backend && ../.venv/bin/python eval_routing.py --live             # Atlas + LLM reais
+
+O modo `--live` escreve dado real (conversas, memória, resgate de pontos) e por isso NUNCA usa
+o banco da demo: ele roda nos bancos de teste isolados (`scripts/isolation.py`, sufixo `_test`
+no mesmo cluster) e recusa rodar se o destino for o da demo sem `ALLOW_DEMO_DB_WRITE=1`.
     cd backend && ../.venv/bin/python eval_routing.py --json out.json --compare antes.json
 """
 
@@ -20,10 +24,11 @@ from time import perf_counter
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from app.config import Settings, get_settings  # noqa: E402
+from app.config import Settings  # noqa: E402
 from app.database import DataStore  # noqa: E402
 from app.llm import LLMGateway  # noqa: E402
 from app.orchestration import OrchestrationService  # noqa: E402
+from scripts.isolation import open_test_store  # noqa: E402
 from seed import seed  # noqa: E402
 
 DATASET = Path(__file__).resolve().parents[1] / "eval" / "routing_dataset.json"
@@ -67,10 +72,13 @@ def _resolved(case: dict, response) -> bool:
 
 
 async def run(live: bool) -> dict:
-    settings = get_settings() if live else Settings(demo_mode=True, mongodb_uri="")
-    store = DataStore(settings)
-    await store.connect()
-    if store.memory:
+    if live:
+        # Banco isolado, nunca o da demo: este modo grava conversa, memória e resgate de pontos.
+        store, settings = await open_test_store(what="eval_routing --live")
+    else:
+        settings = Settings(demo_mode=True, mongodb_uri="")
+        store = DataStore(settings)
+        await store.connect()
         await seed(store, create_indexes=False)
     service = OrchestrationService(store, LLMGateway(settings), settings.global_turn_token_budget)
     registry = await _customers(store)
@@ -117,6 +125,7 @@ async def run(live: bool) -> dict:
         "min_handoffs_respected": round(mean(row["min_handoffs_ok"] for row in rows), 4),
         "avg_tokens": round(mean(row["tokens"] for row in rows), 1),
         "degraded_turns": sum(row["degraded"] for row in rows),
+        "database": settings.mongodb_db,
         "synthetic": dataset["synthetic"],
         "limitation": dataset["limitation"],
     }
@@ -125,7 +134,8 @@ async def run(live: bool) -> dict:
 
 def report(result: dict, compare: dict | None) -> None:
     summary = result["summary"]
-    print(f"\nmodo={summary['mode']}  casos={summary['cases']} (avaliados {summary['scored_cases']}, "
+    print(f"\nbanco={summary.get('database', 'memória')}")
+    print(f"modo={summary['mode']}  casos={summary['cases']} (avaliados {summary['scored_cases']}, "
           f"{summary['skipped_requires_llm']} exigem LLM)  dataset sintético: {summary['synthetic']}")
     print(f"  acurácia de roteamento .... {summary['routing_accuracy']:.1%}")
     print(f"  taxa de resolução ......... {summary['resolution_rate']:.1%}")

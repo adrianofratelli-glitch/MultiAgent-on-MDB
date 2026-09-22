@@ -44,8 +44,11 @@ ROUTER_PROMPT = (
 
 
 def _supervisor_state(conversation_id: str) -> dict:
-    """Estado do supervisor para ESTE turno: teto de passos, timeout e detector de loop."""
-    return {"strict": resilience.supervisor_strict(),
+    """Estado do supervisor para ESTE turno: teto de passos, timeout e detector de loop.
+
+    Degradação graciosa é o padrão; `SUPERVISOR_LEGACY_500=1` devolve o comportamento antigo.
+    """
+    return {"graceful": resilience.graceful_degradation(),
             "guard": resilience.LoopGuard(),
             "timeout": resilience.agent_timeout_seconds(),
             "conversation_id": conversation_id}
@@ -386,7 +389,7 @@ class OrchestrationService:
                         "mantive a orientação já disponível sem processar esta etapa."
                     )
                     break
-            if supervisor["strict"] and supervisor["guard"].visit(current, decision.intent):
+            if supervisor["graceful"] and supervisor["guard"].visit(current, decision.intent):
                 # Mesmo agente + mesma intenção além do limite: o supervisor corta a cadeia em vez
                 # de girar gastando budget, e entrega o caso a um humano com motivo explícito.
                 await metrics.increment("supervisor.loop_guard")
@@ -415,14 +418,14 @@ class OrchestrationService:
                                         registry.get(agent_key), hint, turn_context)
 
                 call = _run_agent()
-                if not supervisor["strict"]:
+                if not supervisor["graceful"]:
                     result = await call
                 else:
                     try:
                         result = await resilience.run_with_timeout(call, supervisor["timeout"])
                     except BudgetExceeded:
                         raise   # limite de custo é decisão de política, não falha a degradar
-                    except Exception as exc:  # noqa: BLE001 — degradação graciosa
+                    except Exception as exc:  # noqa: BLE001 — degradação graciosa (padrão)
                         # Um agente que falha ou não volta não pode terminar o turno em 500 nem em
                         # silêncio: o cliente recebe estado explícito e o turno segue sendo persistido.
                         await metrics.increment(f"agent.{current}.failures")
@@ -469,7 +472,7 @@ class OrchestrationService:
                 try:
                     await chaos.hook("handoff", name=f"{current}->{destination}", phase="between_handoffs")
                 except Exception as exc:  # noqa: BLE001
-                    if not supervisor["strict"]:
+                    if not supervisor["graceful"]:
                         raise
                     responses.append(resilience.degraded_reply(destination))
                     timeline.append(TimelineEvent(

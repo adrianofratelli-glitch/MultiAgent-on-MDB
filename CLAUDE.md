@@ -51,7 +51,7 @@ cd backend && python calibrate_thresholds.py --only scope --apply   # measures m
 cd backend && python generate_situations.py                # (re)generate tests/data/situations.json (costs a few cents of tokens)
 cd backend && python eval_situations.py [--json out.json] [--compare before.json]   # measure the REAL agent on the 287 situations (dev vs holdout)
 cd backend && python migrate_legacy_memory.py [--apply]   # one-off, additive/idempotent: legacy customer_memory (fact_type/value) -> fact; dry-run by default. --apply also clears the old R$350 cap
-cd backend && python restore_demo_fixtures.py             # loyalty balances back to seed values (the live eval spends carla's 500 points per run)
+cd backend && python restore_demo_fixtures.py             # EMERGENCY only: loyalty balances back to seed values. The scripts that spend state now run on the isolated *_test databases (scripts/isolation.py), so the demo DB no longer needs restoring in the normal flow
 cd backend && LIVE=1 pytest tests/test_live.py -q        # LIVE mode: real Atlas + real LLM (costs tokens; disposable customer_key, cleans up, Langfuse off). Run before shipping — DEMO_MODE hides real-driver bugs (naive datetimes, raw ObjectId, legacy docs)
 ```
 
@@ -123,7 +123,7 @@ No containerization (no Dockerfile/docker-compose) — local dev only, via venv 
 
 `git push` roda `.githooks/pre-push` (ruff + pytest offline + `tests/test_live.py`); `SKIP_LIVE=1` pula a parte live. Num clone novo: `git config core.hooksPath .githooks`.
 
-Antes de uma demo/eval que gasta estado: `python backend/restore_demo_fixtures.py` (o eval consome 500 pontos da carla por rodada). Depois de mexer em `DEMO_SCENARIOS`: `python backend/sync_demo_scenarios.py`.
+Os scripts que gastam estado (`crash_resume`, `eval_routing --live`) rodam nos bancos isolados `*_test` e não tocam a demo — `python backend/restore_demo_fixtures.py` ficou como recurso de emergência (ex.: alguém rodou com `ALLOW_DEMO_DB_WRITE=1`, ou `backend/eval.py`, que continua usando o banco da demo). Depois de mexer em `DEMO_SCENARIOS`: `python backend/sync_demo_scenarios.py`.
 
 **O que vive no cluster Atlas (NÃO está no git — não refaça, verifique):** brain DB `multiagent_brain`: `turn_probes` (44) + índice `turn_probes_vs` + `turn_classifier_config` (limiar 0,7162); `scope_probes` (214) + índice `scope_probes_vs` + `scope_classifier_config` (margens 0,04/0,04/0,04); `guardrail_policies.vector_block_threshold` = 0,8814; `demo_scenarios` (53 roteiros, via `sync_demo_scenarios.py`). Main DB: `customer_memory` legado migrado por `migrate_legacy_memory.py` (aditivo; teto de R$ 350 removido). Adicionar probes reindexa de forma assíncrona (minutos); recalibre só depois de o probe novo ser o vizinho nº 1 dele mesmo. **O cluster precisa estar ligado**: o hook `pre-push` e todas as suítes live dependem dele (já esteve pausado uma vez e o push falhou).
 
@@ -133,25 +133,40 @@ Antes de uma demo/eval que gasta estado: `python backend/restore_demo_fixtures.p
 
 Regressões de frontend: `cd frontend && node --test tests/*.test.mjs`. No workspace, `../STATUS_PORTFOLIO.md` aponta para as evidências e decisões restantes. Não faça push nem altere dataset/schema/core sem autorização específica.
 
-## Resiliência e tracing (branch `feat/resilience-observability`, tudo opt-in)
+## Resiliência e tracing (resiliente por padrão; observabilidade opt-in)
 
 `app/observability.py` liga o tracing do `_shared` (`TRACE_SINK=console|phoenix|atlas`) e **força
 `TRACE_MASK_PII=1`** sempre que um sink está ligado; span por turno, roteamento, agente, handoff,
 tool e chamada de LLM (tokens/custo/latência). `scripts/trace_query.py` responde "quem travou e
 onde" agregando a collection de spans. `app/resilience.py` traz a fronteira única de tool
 (`call_tool`: span + caos + circuit breaker + `TOOL_TIMEOUT_SECONDS`), o `LoopGuard` e a
-degradação graciosa do supervisor (`SUPERVISOR_STRICT=1`, `AGENT_TIMEOUT_SECONDS`). O retry com
+degradação graciosa do supervisor. **Degradação graciosa, timeout por agente
+(`AGENT_TIMEOUT_SECONDS`=45), detector de laço e circuit breaker por tool são o PADRÃO** — as
+flags existem para desligar (`SUPERVISOR_LEGACY_500=1` devolve o 500 antigo, `TOOL_BREAKER=0`)
+ou ajustar limite, nunca para ligar. O retry com
 backoff, fallback de modelo e breaker por endpoint continuam onde sempre estiveram (`app/llm.py`,
 SDK Anthropic direto — **não** usar `grove_client` aqui: perderia a contabilidade por tentativa).
 
 `app/chaos.py` + `scripts/chaos_suite.py`: 10 cenários de falha injetada no caminho real, atrás de
 `CHAOS=1`, cada um com assertion explícita; regressão em `tests/test_chaos.py`. Última execução
-10/10 — e ela revelou 3 bugs reais, já corrigidos (teto de tool fora do hop, falha que não contava
+11/11 — e ela revelou 3 bugs reais, já corrigidos (teto de tool fora do hop, falha que não contava
 para o breaker, ponto de caos fora da corrotina cronometrada). Ver `docs/chaos-report.md`.
 `eval/routing_dataset.json` (24 casos, `synthetic: true`) + `backend/eval_routing.py` medem rota,
-resolução e handoffs; formato em `eval/FORMAT.md` para o singleagent comparar. Atritos com o
+resolução e handoffs; formato em `eval/FORMAT.md` para o singleagent comparar.
+
+**Isolamento de banco (`backend/scripts/isolation.py`):** `crash_resume` e `eval_routing --live`
+escrevem dado real e por isso usam `multi_agent_poc_test`/`multiagent_brain_test` no MESMO
+cluster, nunca os bancos da demo; recusam rodar contra a demo sem `ALLOW_DEMO_DB_WRITE=1`.
+Provisionar/repetir: `cd backend && ../.venv/bin/python scripts/isolation.py` (seed + índices
+Search/Vector reais, minutos na primeira vez; copia `guardrail_policies` e os `*_classifier_config`
+do cérebro da demo em LEITURA). O banco de teste não tem `turn_probes`/`scope_probes`, então lá os
+classificadores por embedding caem no fallback por palavras. Como nada mais toca a demo,
+`restore_demo_fixtures.py` saiu do fluxo normal: é recurso de emergência para quem rodar fora do
+padrão. Atritos com o
 `_shared` em `docs/shared-feedback.md`. **Sem nenhuma dessas flags o comportamento é o de antes**
-e a suíte offline continua 402/402 idêntica ao baseline em `docs/baseline-tests.txt`.
+e a suíte offline continua verde nome a nome contra `docs/baseline-tests.txt` (402 originais + 6
+de `tests/test_isolation.py`; com `CHAOS=1`, +10 de `tests/test_chaos.py`), tanto no padrão novo
+quanto com `SUPERVISOR_LEGACY_500=1`.
 
 ## Observability (Langfuse)
 

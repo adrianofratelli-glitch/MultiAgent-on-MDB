@@ -81,7 +81,7 @@ async def lifespan(app: FastAPI):
     if settings.warmup_on_start:
         app.state.warmup.trigger()  # a demo já nasce aquecida; a UI dispara de novo quando abre (respeita o cooldown)
     log("startup", storage="memory" if store.memory else "mongodb_atlas", trace_sink=trace_sink,
-        supervisor_strict=resilience.supervisor_strict(), tool_breaker=resilience.tool_breaker_enabled(),
+        graceful_degradation=resilience.graceful_degradation(), tool_breaker=resilience.tool_breaker_enabled(),
         edge_guardrails=edge_guardrails.enabled())
     yield
     with suppress(Exception):
@@ -145,7 +145,7 @@ async def create_token(payload: TokenRequest, store: DataStore = Depends(get_sto
 
 def _degraded_turn(payload: ChatRequest, customer: dict, reason: str) -> ChatResponse:
     """Degradação graciosa no topo: o turno falhou, mas o cliente recebe estado explícito (200),
-    nunca um 500 mudo. Só com SUPERVISOR_STRICT=1; sem a flag o comportamento é o de sempre."""
+    nunca um 500 mudo. É o padrão; SUPERVISOR_LEGACY_500=1 devolve o comportamento antigo."""
     return ChatResponse(
         conversation_id=payload.conversation_id or f"conv-{uuid.uuid4().hex[:12]}",
         response=resilience.degraded_reply("atendimento"),
@@ -169,13 +169,13 @@ async def chat(request: Request, payload: ChatRequest, customer: Annotated[dict,
                 )
             except TimeoutError as exc:
                 await metrics.increment("turns.deadline_exceeded")
-                if resilience.supervisor_strict():
+                if resilience.graceful_degradation():
                     return _degraded_turn(payload, customer, "deadline global do turno excedido")
                 raise HTTPException(status.HTTP_504_GATEWAY_TIMEOUT, "deadline global do turno excedido") from exc
             except (BudgetExceeded, HTTPException):
                 raise
-            except Exception as exc:  # noqa: BLE001 — com supervisor estrito, falha não vira 500 mudo
-                if not resilience.supervisor_strict():
+            except Exception as exc:  # noqa: BLE001 — por padrão, falha não vira 500 mudo
+                if not resilience.graceful_degradation():
                     raise
                 await metrics.increment("turns.degraded")
                 log("turn_degraded", error=type(exc).__name__, customer_key=customer["customer_key"])

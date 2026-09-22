@@ -9,11 +9,15 @@ cd backend && CHAOS=1 LIVE=1 ../.venv/bin/python scripts/chaos_suite.py     # in
 cd backend && CHAOS=1 ../.venv/bin/python -m pytest tests/test_chaos.py -q  # como regressão
 ```
 
+A degradação graciosa do supervisor, o timeout por agente, o detector de laço e o circuit breaker
+por tool são o comportamento PADRÃO — a bateria não liga flag nenhuma para obtê-los; a única flag
+de supervisor que aparece aqui é `SUPERVISOR_LEGACY_500=1`, no cenário que prova o modo antigo.
+
 Injeção fica em `app/chaos.py`, atrás de `CHAOS=1`: pontos de falha no caminho REAL (gateway de
 LLM, fronteira de tool, execução de agente, handoff), não mocks espalhados pelos testes. Sem a
 variável, cada ponto é uma leitura de ambiente e um `return`.
 
-## Resultado (última execução: 10/10)
+## Resultado (última execução: 11/11)
 
 | Cenário | O que injeta | Assertion | Resultado |
 |---|---|---|---|
@@ -26,7 +30,8 @@ variável, cada ponto é uma leitura de ambiente e um `return`.
 | `tool_circuit_breaker` | tool falhando sem parar | abre o circuito em 4 falhas e curto-circuita | PASS |
 | `loop_guard` | mesmo agente + mesma intenção além do limite | corta a cadeia e escala para humano com motivo | PASS |
 | `concurrent_same_conversation` | 5 requests simultâneos na mesma `conversation_id` | 12 mensagens, 1 documento, nenhuma exceção | PASS |
-| `crash_resume` | `SIGKILL` no meio da conversa (Atlas real) | depois do restart, `/api/conversations/latest` devolve a conversa | PASS (21,6s) |
+| `legacy_500_flag` | falha de tool com `SUPERVISOR_LEGACY_500=1` | a exceção volta a subir (prova que o default novo é o que degrada) | PASS |
+| `crash_resume` | `SIGKILL` no meio da conversa (banco de teste isolado) | depois do restart, `/api/conversations/latest` devolve a conversa | PASS (27,3s) |
 
 ## Bugs REAIS revelados e corrigidos
 
@@ -53,7 +58,13 @@ Nenhum dos três exigiu mudança de arquitetura; todos estão cobertos por teste
 * `crash_resume` precisa de Atlas real (`LIVE=1`); sem cluster ele se declara `skipped`, nunca
   PASS. Sobe o backend numa porta própria (`CRASH_RESUME_PORT`, default 8041), sem chave de LLM
   (custo zero em tokens) e apaga a conversa que criou.
-* A degradação graciosa é **opt-in** (`SUPERVISOR_STRICT=1`). Sem a flag, a falha de um agente
-  continua subindo para o handler global (500 com `request_id`), que é o comportamento atual.
+* **Isolamento de banco:** `crash_resume` e `eval_routing.py --live` escrevem nos bancos de teste
+  (`<banco>_test`, `backend/scripts/isolation.py`) e recusam o banco da demo sem
+  `ALLOW_DEMO_DB_WRITE=1`. O banco de teste não recebe `turn_probes`/`scope_probes`: lá os
+  classificadores por embedding não dão veredito e o app usa o fallback por palavras — é o
+  comportamento fail-open documentado, mas significa que o eval isolado NÃO mede essa camada.
+* A degradação graciosa é o **padrão** desde 22/09/2026 — não depende de flag. `SUPERVISOR_LEGACY_500=1`
+  devolve o comportamento antigo (falha sobe para o handler global, 500 com `request_id`), e o
+  cenário `legacy_500_flag` existe justamente para provar que essa flag ainda funciona.
 * Concorrência foi medida em 5 requests simultâneos no mesmo turno de conversa, em processo
   único. Não é teste de carga nem de múltiplas instâncias.

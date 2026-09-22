@@ -6,9 +6,14 @@ o PoV fala com o SDK Anthropic direto, sem LangChain). O que faltava é o mesmo 
 OUTRA metade das chamadas externas: as tools (consultas e escritas no Atlas), e um supervisor
 que não fique esperando para sempre.
 
-Tudo opt-in:
-    TOOL_BREAKER=1        liga o circuit breaker por tool (default: só span + chaos)
-    SUPERVISOR_STRICT=1   liga timeout por agente, detecção de loop e degradação explícita
+A degradação graciosa do supervisor é o PADRÃO: um agente que falha ou não volta nunca termina
+o turno em 500 mudo nem em silêncio, com ou sem flag.
+
+    SUPERVISOR_LEGACY_500=1   volta o comportamento antigo (a exceção sobe ao handler global)
+    AGENT_TIMEOUT_SECONDS=45  teto por hop de agente
+    LOOP_GUARD_REPEATS=2      repetições de (agente, intenção) antes de escalar para humano
+    TOOL_TIMEOUT_SECONDS=0    teto por chamada de tool (0 = desligado)
+    TOOL_BREAKER=0            desliga o circuit breaker por tool (padrão: ligado)
 """
 
 from __future__ import annotations
@@ -32,11 +37,14 @@ def _flag(name: str, default: bool = False) -> bool:
 
 
 def tool_breaker_enabled() -> bool:
-    return _flag("TOOL_BREAKER")
+    """Padrão: ligado. Só abre depois de 4 falhas CONSECUTIVAS da mesma tool, então não muda
+    nada em operação normal; `TOOL_BREAKER=0` desliga."""
+    return _flag("TOOL_BREAKER", default=True)
 
 
-def supervisor_strict() -> bool:
-    return _flag("SUPERVISOR_STRICT")
+def graceful_degradation() -> bool:
+    """Padrão: ligada. Só `SUPERVISOR_LEGACY_500=1` devolve a falha crua ao handler global."""
+    return not _flag("SUPERVISOR_LEGACY_500")
 
 
 def agent_timeout_seconds() -> float:

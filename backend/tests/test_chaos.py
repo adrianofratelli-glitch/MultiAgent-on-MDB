@@ -59,6 +59,10 @@ async def test_loop_guard_escalates_to_a_human():
     await _assert_scenario("loop_guard")
 
 
+async def test_legacy_flag_restores_the_old_500_behaviour():
+    await _assert_scenario("legacy_500_flag")
+
+
 async def test_concurrent_requests_on_one_conversation_do_not_corrupt_state():
     await _assert_scenario("concurrent_same_conversation")
 
