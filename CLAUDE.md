@@ -133,6 +133,26 @@ Antes de uma demo/eval que gasta estado: `python backend/restore_demo_fixtures.p
 
 Regressões de frontend: `cd frontend && node --test tests/*.test.mjs`. No workspace, `../STATUS_PORTFOLIO.md` aponta para as evidências e decisões restantes. Não faça push nem altere dataset/schema/core sem autorização específica.
 
+## Resiliência e tracing (branch `feat/resilience-observability`, tudo opt-in)
+
+`app/observability.py` liga o tracing do `_shared` (`TRACE_SINK=console|phoenix|atlas`) e **força
+`TRACE_MASK_PII=1`** sempre que um sink está ligado; span por turno, roteamento, agente, handoff,
+tool e chamada de LLM (tokens/custo/latência). `scripts/trace_query.py` responde "quem travou e
+onde" agregando a collection de spans. `app/resilience.py` traz a fronteira única de tool
+(`call_tool`: span + caos + circuit breaker + `TOOL_TIMEOUT_SECONDS`), o `LoopGuard` e a
+degradação graciosa do supervisor (`SUPERVISOR_STRICT=1`, `AGENT_TIMEOUT_SECONDS`). O retry com
+backoff, fallback de modelo e breaker por endpoint continuam onde sempre estiveram (`app/llm.py`,
+SDK Anthropic direto — **não** usar `grove_client` aqui: perderia a contabilidade por tentativa).
+
+`app/chaos.py` + `scripts/chaos_suite.py`: 10 cenários de falha injetada no caminho real, atrás de
+`CHAOS=1`, cada um com assertion explícita; regressão em `tests/test_chaos.py`. Última execução
+10/10 — e ela revelou 3 bugs reais, já corrigidos (teto de tool fora do hop, falha que não contava
+para o breaker, ponto de caos fora da corrotina cronometrada). Ver `docs/chaos-report.md`.
+`eval/routing_dataset.json` (24 casos, `synthetic: true`) + `backend/eval_routing.py` medem rota,
+resolução e handoffs; formato em `eval/FORMAT.md` para o singleagent comparar. Atritos com o
+`_shared` em `docs/shared-feedback.md`. **Sem nenhuma dessas flags o comportamento é o de antes**
+e a suíte offline continua 402/402 idêntica ao baseline em `docs/baseline-tests.txt`.
+
 ## Observability (Langfuse)
 
 `app/langfuse_client.py:build_turn_trace` manda UMA trace por turno cobrindo a `timeline` inteira — roteamento, decisão de cache, cada hop de agente (generation) e handoff/guardrail (span) — chamada de dentro de `orchestration.py:_persist_trace`, o único ponto de saída de todo turno (6 caminhos: bloqueio, fora de escopo, cache hit em `run_turn`/`_run_fanout`, cadeia completa, fanout completo). Fail-open sem `LANGFUSE_PUBLIC_KEY`/`LANGFUSE_SECRET_KEY`/`langfuse_enabled` — nunca derruba o turno; `get_langfuse()` roda `auth_check()` uma vez por processo para nunca expor um link que dá 404. `message`/`response` chegam já mascarados pelo guardrail de PII antes de qualquer chamada ao Langfuse. O card "💰 Economia MongoDB" no frontend (`App.jsx`) mostra cascata semântica + prompt cache do turno sem precisar abrir o Langfuse.

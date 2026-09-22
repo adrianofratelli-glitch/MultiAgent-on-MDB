@@ -9,7 +9,9 @@ from typing import Any, Awaitable, Callable, TypeVar
 
 from pymongo import ASCENDING, AsyncMongoClient
 
+from .chaos import mangle
 from .config import Settings
+from .resilience import call_tool
 
 logger = logging.getLogger(__name__)
 
@@ -230,12 +232,30 @@ class DataStore:
                 yield Transaction(session, atomic=True)
 
     async def find_one(self, name: str, query: dict, *, brain: bool = False, session=None) -> dict | None:
+        return mangle("tool", f"{name}.find_one", await call_tool(
+            f"{name}.find_one", self._find_one(name, query, brain=brain, session=session),
+            **{"db.collection": name, "db.op": "find_one"}))
+
+    async def _find_one(self, name: str, query: dict, *, brain: bool = False, session=None) -> dict | None:
         if not self.memory:
             return await self._collection(name, brain).find_one(query, session=_driver_session(session))
         async with self._lock:
             return next((copy.deepcopy(d) for d in self._bucket(name, brain) if _matches(d, query)), None)
 
     async def find_many(
+        self,
+        name: str,
+        query: dict | None = None,
+        *,
+        brain: bool = False,
+        limit: int = 100,
+        sort: list[tuple[str, int]] | None = None,
+    ) -> list[dict]:
+        return mangle("tool", f"{name}.find_many", await call_tool(
+            f"{name}.find_many", self._find_many(name, query, brain=brain, limit=limit, sort=sort),
+            **{"db.collection": name, "db.op": "find"}))
+
+    async def _find_many(
         self,
         name: str,
         query: dict | None = None,
@@ -267,6 +287,10 @@ class DataStore:
         return len(await self.find_many(name, query, brain=brain, limit=100_000))
 
     async def insert_one(self, name: str, document: dict, *, brain: bool = False, session=None) -> None:
+        await call_tool(f"{name}.insert_one", self._insert_one(name, document, brain=brain, session=session),
+                        **{"db.collection": name, "db.op": "insert"})
+
+    async def _insert_one(self, name: str, document: dict, *, brain: bool = False, session=None) -> None:
         payload = copy.deepcopy(document)
         if not self.memory:
             await self._collection(name, brain).insert_one(payload, session=_driver_session(session))
@@ -294,6 +318,14 @@ class DataStore:
                 bucket.append(payload)
 
     async def update_one(
+        self, name: str, query: dict, update: dict, *, brain: bool = False, upsert: bool = False,
+        session=None,
+    ) -> int:
+        return await call_tool(
+            f"{name}.update_one", self._update_one(name, query, update, brain=brain, upsert=upsert, session=session),
+            **{"db.collection": name, "db.op": "update"})
+
+    async def _update_one(
         self, name: str, query: dict, update: dict, *, brain: bool = False, upsert: bool = False,
         session=None,
     ) -> int:
@@ -334,6 +366,11 @@ class DataStore:
             return 1
 
     async def aggregate(self, name: str, pipeline: list[dict], *, brain: bool = False) -> list[dict]:
+        return mangle("tool", f"{name}.aggregate", await call_tool(
+            f"{name}.aggregate", self._aggregate(name, pipeline, brain=brain),
+            **{"db.collection": name, "db.op": "aggregate"}))
+
+    async def _aggregate(self, name: str, pipeline: list[dict], *, brain: bool = False) -> list[dict]:
         """Só para pipelines reais ($vectorSearch/$unionWith) — sem equivalente em DEMO_MODE, chamador
         precisa ter um caminho alternativo quando self.memory é True (ver cascade.py)."""
         if self.memory:

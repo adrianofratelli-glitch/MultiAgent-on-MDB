@@ -4,11 +4,11 @@ from time import perf_counter
 
 from .agents import RUNNERS
 from .economics import summarize_calls
-from .budget import TurnBudget, estimate_tokens
+from .budget import BudgetExceeded, TurnBudget, estimate_tokens
 from .cascade import (GLOBAL_CACHE_INTENTS, CascadeResult, cascade_long_term_context, cascade_lookup, cascade_store_episode,
                       cascade_store_short_term, cascade_store_turn)
 from .database import DataStore, utcnow
-from . import scope_classifier
+from . import chaos, observability, resilience, scope_classifier
 from .guardrails import check_input, check_output, needs_security_review
 from .langfuse_client import build_turn_trace
 from .llm import LLMGateway
@@ -41,6 +41,14 @@ ROUTER_PROMPT = (
     "'nenhum' nesse caso, NUNCA escolha um agente por eliminação.\n"
     "Chaves permitidas: "
 )
+
+
+def _supervisor_state(conversation_id: str) -> dict:
+    """Estado do supervisor para ESTE turno: teto de passos, timeout e detector de loop."""
+    return {"strict": resilience.supervisor_strict(),
+            "guard": resilience.LoopGuard(),
+            "timeout": resilience.agent_timeout_seconds(),
+            "conversation_id": conversation_id}
 
 
 def reaches_scope_classifier(message: str) -> bool:
@@ -116,9 +124,11 @@ class OrchestrationService:
 
     async def _route_with_llm(self, message: str, orchestrator: dict, allowed: list[str], budget) -> str | None:
         """Uma linha: a chave do agente, `conversa` ou `nenhum`. Classificar é decisão, não criação: temperature 0."""
-        text, _ = await self.llm.complete(
-            agent={**orchestrator, "temperature": 0}, user_message=message,
-            dynamic_context=ROUTER_PROMPT + ", ".join(allowed) + ", conversa, nenhum", budget=budget)
+        with observability.span("routing", **{"routing.candidates": len(allowed)}) as current:
+            text, _ = await self.llm.complete(
+                agent={**orchestrator, "temperature": 0}, user_message=message,
+                dynamic_context=ROUTER_PROMPT + ", ".join(allowed) + ", conversa, nenhum", budget=budget)
+            current.set_attribute("routing.decision", (text or "").strip().splitlines()[0][:40] if text else "sem_resposta")
         return text
 
     @staticmethod
@@ -353,6 +363,7 @@ class OrchestrationService:
         ) if recent_turns else ""
 
         budget.reserve(target, estimate_tokens(masked))
+        supervisor = _supervisor_state(conversation_id)
         handoff_chain: list[dict] = []
         responses: list[str] = []
         current = target
@@ -375,6 +386,16 @@ class OrchestrationService:
                         "mantive a orientação já disponível sem processar esta etapa."
                     )
                     break
+            if supervisor["strict"] and supervisor["guard"].visit(current, decision.intent):
+                # Mesmo agente + mesma intenção além do limite: o supervisor corta a cadeia em vez
+                # de girar gastando budget, e entrega o caso a um humano com motivo explícito.
+                await metrics.increment("supervisor.loop_guard")
+                responses.append(resilience.HUMAN_HANDOFF_REPLY)
+                timeline.append(TimelineEvent(
+                    category="handoff", title="Supervisor interrompeu: laço detectado", agent=current,
+                    result={"loop_on": list(supervisor["guard"].tripped_on or ()), "escalated_to": "humano"},
+                    reason="loop_guard"))
+                break
             await metrics.increment(f"agent.{current}.turns")
             turn_context = {
                 "conversation_id": conversation_id,
@@ -384,7 +405,33 @@ class OrchestrationService:
                 "visit_counts": dict(visit_counts),
                 "returning_from": handoff_path[-2] if len(handoff_path) > 1 else None,
             }
-            result = await runner(self.store, masked, customer, self.llm, budget, registry.get(current), (history_hint + long_term_hint) if hop == 0 else "", turn_context)
+            with observability.span("agent", agent=current, conversation_id=conversation_id, hop=hop,
+                                    intent=decision.intent):
+                async def _run_agent(agent_key=current, hint=(history_hint + long_term_hint) if hop == 0 else ""):
+                    # O ponto de caos fica DENTRO da corrotina cronometrada: um agente travado
+                    # só prova alguma coisa se o teto do supervisor o interromper de verdade.
+                    await chaos.hook("agent", name=agent_key)
+                    return await runner(self.store, masked, customer, self.llm, budget,
+                                        registry.get(agent_key), hint, turn_context)
+
+                call = _run_agent()
+                if not supervisor["strict"]:
+                    result = await call
+                else:
+                    try:
+                        result = await resilience.run_with_timeout(call, supervisor["timeout"])
+                    except BudgetExceeded:
+                        raise   # limite de custo é decisão de política, não falha a degradar
+                    except Exception as exc:  # noqa: BLE001 — degradação graciosa
+                        # Um agente que falha ou não volta não pode terminar o turno em 500 nem em
+                        # silêncio: o cliente recebe estado explícito e o turno segue sendo persistido.
+                        await metrics.increment(f"agent.{current}.failures")
+                        responses.append(resilience.degraded_reply(current))
+                        timeline.append(TimelineEvent(
+                            category="agent", title="Agente degradado (falha contida pelo supervisor)",
+                            agent=current, result={"error_type": type(exc).__name__,
+                                                   "timeout_seconds": supervisor["timeout"]}))
+                        break
             timeline.append(result.event)
             timeline.extend(result.extra_events)
             responses.append(result.response)
@@ -407,12 +454,28 @@ class OrchestrationService:
             # customer_key denormalizado: o Change Stream de /api/events/stream
             # filtra por dono direto no $match, sem um find_one extra por evento.
             handoff = {"conversation_id": conversation_id, "customer_key": customer["customer_key"], "from_agent": current, "to_agent": destination, "reason": result.handoff_reason, "at": utcnow()}
-            await self.store.insert_one("agent_handoffs", handoff)
+            with observability.span("handoff", **{"handoff.from": current, "handoff.to": destination,
+                                                  "conversation_id": conversation_id,
+                                                  "handoff.reason": result.handoff_reason or ""}):
+                await self.store.insert_one("agent_handoffs", handoff)
             handoff_chain.append(handoff)
             timeline.append(TimelineEvent(category="handoff", title="Retorno controlado" if is_revisit else "Handoff explícito", agent=current, collection="agent_handoffs", op="write", filter={"conversation_id": conversation_id}, result={"to_agent": destination, "revisit": is_revisit}, reason=result.handoff_reason))
             await metrics.increment(f"agent.{current}.handoffs")
             if is_revisit:
                 await metrics.increment("coordination.revisits")
+            # Falha do provedor ENTRE handoffs: a cadeia já escreveu o handoff; o turno tem de
+            # terminar com estado explícito, nunca com meia resposta e sem aviso.
+            if chaos.enabled():
+                try:
+                    await chaos.hook("handoff", name=f"{current}->{destination}", phase="between_handoffs")
+                except Exception as exc:  # noqa: BLE001
+                    if not supervisor["strict"]:
+                        raise
+                    responses.append(resilience.degraded_reply(destination))
+                    timeline.append(TimelineEvent(
+                        category="handoff", title="Handoff degradado (falha contida pelo supervisor)",
+                        agent=current, result={"error_type": type(exc).__name__, "to_agent": destination}))
+                    break
             visit_counts[destination] = visit_counts.get(destination, 0) + 1
             handoff_path.append(destination)
             current = destination

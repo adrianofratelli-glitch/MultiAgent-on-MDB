@@ -88,6 +88,98 @@ de um build de produção limpo do frontend e auditoria de dependências. A CI
 usa a implementação determinística de data-store em memória e não exige
 credenciais de Atlas ou Anthropic.
 
+## Fluxo de um turno
+
+```
+cliente ──> POST /api/chat (JWT)
+             │
+             ├─ guardrail de entrada  (denylist lexical -> vetorial -> classificador LLM)
+             ├─ escopo por embedding  (in / out / chat)  ── out/chat ──> orientação, 0 token
+             ├─ roteamento            (regra determinística -> LLM só na dúvida)
+             ├─ cascata semântica     (curto prazo -> cache global)  ── HIT ──> resposta cacheada
+             │
+             ▼
+        SUPERVISOR  (teto de 5 hops, timeout por agente, detector de laço)
+             │
+             ├── fan-out paralelo ──> order_agent ║ billing_agent
+             └── cadeia ──> support_agent ─handoff─> product_agent ─handoff─> order_agent ─> logistics/billing
+                                 │                       │                       │
+                                 └── tools (Atlas): find / vectorSearch / hybridSearch / write
+             │
+             ├─ guardrail de saída + memória (fato, episódio, cache)
+             └─ trace do turno (Langfuse) + spans OpenTelemetry (agente, handoff, tool, LLM)
+```
+
+Cada agente, handoff, tool e chamada de LLM vira um span com `conversation_id`, agente, tokens,
+custo estimado e latência — é o que `backend/scripts/trace_query.py` usa para responder **quem
+travou e onde**:
+
+```bash
+cd backend && TRACE_SINK=atlas ../.venv/bin/python run.py      # spans viram documentos no Atlas
+cd backend && ../.venv/bin/python scripts/trace_query.py       # ranking por conversa
+conversa               spans erros  tokens  custo_usd  mais lento
+conv-8b3ca34a297a         20     2       0    0.00000  agent [order_agent] 3ms  ERRO em tool.orders.find_many
+```
+
+## Flags (tudo opt-in; sem nenhuma delas o comportamento é o de sempre)
+
+| Flag | Default | O que liga |
+|---|---|---|
+| `TRACE_SINK` | `off` | tracing OpenTelemetry: `console`, `phoenix` ou `atlas` (spans viram documentos) |
+| `TRACE_MASK_PII` | forçado a `1` | com qualquer sink ligado, o conteúdo dos spans é mascarado — não é opcional |
+| `SUPERVISOR_STRICT` | `0` | timeout por agente, detector de laço e degradação graciosa (nunca 500 mudo) |
+| `AGENT_TIMEOUT_SECONDS` | `45` | teto por hop de agente (só com `SUPERVISOR_STRICT=1`) |
+| `LOOP_GUARD_REPEATS` | `2` | repetições de (agente, intenção) antes de escalar para humano |
+| `TOOL_TIMEOUT_SECONDS` | `0` (desligado) | teto por chamada de tool, inclusive fora do hop de agente |
+| `TOOL_BREAKER` | `0` | circuit breaker por tool (4 falhas consecutivas abrem por 30s) |
+| `GUARDRAILS_EDGE` | `0` | `mask_pii` nos logs e `validate_output` (`max_repairs=0`) na resposta, via `_shared` |
+| `CHAOS` | `0` | habilita os pontos de injeção de falha (`CHAOS_SCENARIO`, `CHAOS_TARGET`, `CHAOS_PHASE`, `CHAOS_STATUS`, `CHAOS_DELAY`, `CHAOS_COUNT`) |
+
+O gateway de LLM (`app/llm.py`) já tinha retry com backoff, fallback de modelo e circuit breaker
+por endpoint — isso continua ligado por padrão, como sempre esteve.
+
+## Resiliência (medida, não afirmada)
+
+`backend/scripts/chaos_suite.py` é o PoV tentando se quebrar sozinho: 10 cenários de falha
+injetada no caminho real, cada um com uma assertion explícita do que "resiliente" significa ali.
+Última execução: **10/10**. Os mesmos cenários rodam como regressão em `tests/test_chaos.py`.
+
+```bash
+cd backend && CHAOS=1 ../.venv/bin/python scripts/chaos_suite.py          # bateria toda
+cd backend && CHAOS=1 LIVE=1 ../.venv/bin/python scripts/chaos_suite.py   # inclui o SIGKILL (Atlas real)
+cd backend && CHAOS=1 ../.venv/bin/python -m pytest tests/test_chaos.py -q
+```
+
+**O que quebrava antes e foi corrigido por causa da bateria:**
+
+* O timeout do supervisor só cobria o que acontece dentro de um hop. Uma consulta pendurada no
+  carregamento do turno segurava tudo por 20s com `AGENT_TIMEOUT_SECONDS=1`. Agora existe teto
+  por tool (`TOOL_TIMEOUT_SECONDS`) na fronteira única de acesso ao Atlas: 21,2s -> 2,2s.
+* Falha de tool não contava para o circuit breaker (o ponto de falha estava fora do bloco
+  protegido): 5 turnos de erro seguidos deixavam o contador em zero.
+* O cenário de "agente travado" não interrompia nada — medir isso foi o que mostrou que o ponto
+  de falha precisava estar dentro da corrotina cronometrada.
+
+**Limitações conhecidas:** não há streaming (o cenário de falha "no meio do stream" é a queda
+logo depois da resposta do provedor); a degradação graciosa é opt-in (`SUPERVISOR_STRICT=1`);
+a concorrência foi medida com 5 requests simultâneos em processo único, não é teste de carga.
+Detalhes e números em [docs/chaos-report.md](docs/chaos-report.md).
+
+## Eval comparável com o singleagent
+
+24 conversas de referência com roteamento esperado (`eval/routing_dataset.json`, `synthetic: true`)
+e as métricas que as duas PoVs conseguem medir: acurácia de roteamento (agente de **entrada**),
+taxa de resolução, handoffs por turno e tokens por turno. Formato documentado em
+[eval/FORMAT.md](eval/FORMAT.md) para o singleagent reaproveitar.
+
+```bash
+cd backend && ../.venv/bin/python eval_routing.py           # offline: 100% rota, 100% resolução, 0,125 handoff/turno, 43,5 tokens
+cd backend && ../.venv/bin/python eval_routing.py --live    # Atlas + LLM: 100% / 100% / 0,125 / 853,8 tokens
+```
+
+O dataset é sintético e da mesma família de modelo do agente: serve como regressão, não como
+estimativa de tráfego real. Três casos só têm veredito com LLM e ficam fora da acurácia offline.
+
 ## Observability opcional: Langfuse
 
 Com `LANGFUSE_PUBLIC_KEY`/`LANGFUSE_SECRET_KEY` no `.env` (`backend/app/langfuse_client.py`), cada turno vira UMA trace cobrindo a timeline inteira — roteamento, decisão de cache e cada hop de agente com seu handoff, não só um número de cache hit-rate isolado. Cada agente que respondeu vira uma generation; cache/handoff/memória/guardrail viram spans. Fail-open: sem as chaves, ou com o Langfuse fora do ar, vira no-op (`auth_check()` roda uma vez por processo, então um Langfuse indisponível nunca expõe um link que dê 404 no meio de uma demo). Badge "Ver trace no Langfuse" e card "Economia MongoDB" (cascata semântica + prompt cache) aparecem no cabeçalho do turno, na própria UI.
@@ -98,4 +190,4 @@ Defina `ENVIRONMENT=production`, `AUTH_REQUIRED=1` e `DEMO_TOKEN_ISSUANCE_ENABLE
 
 ## Documentação
 
-[Arquitetura](docs/architecture.md) · [ADR-001 — coordenação orientada a documentos](docs/adr/ADR-001-arquitetura-multi-agente.md) · [ADR-002 — memória por LLM e turno pessoal fora do cache](docs/adr/ADR-002-memoria-llm-e-turno-pessoal.md) · [ADR-003 — guardrail em duas faixas e fora de escopo](docs/adr/ADR-003-guardrail-em-duas-faixas.md) · [ADR-004 — escopo por embedding e medição por situações](docs/adr/ADR-004-escopo-por-embedding-e-medicao-por-situacoes.md)
+[Arquitetura](docs/architecture.md) · [ADR-001 — coordenação orientada a documentos](docs/adr/ADR-001-arquitetura-multi-agente.md) · [ADR-002 — memória por LLM e turno pessoal fora do cache](docs/adr/ADR-002-memoria-llm-e-turno-pessoal.md) · [ADR-003 — guardrail em duas faixas e fora de escopo](docs/adr/ADR-003-guardrail-em-duas-faixas.md) · [ADR-004 — escopo por embedding e medição por situações](docs/adr/ADR-004-escopo-por-embedding-e-medicao-por-situacoes.md) · [Relatório de caos](docs/chaos-report.md) · [Formato do eval](eval/FORMAT.md) · [Atritos com o _shared](docs/shared-feedback.md)

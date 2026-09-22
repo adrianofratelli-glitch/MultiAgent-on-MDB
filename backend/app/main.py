@@ -12,6 +12,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
+from . import edge_guardrails, observability, resilience
 from .budget import BudgetExceeded
 from .cascade import CACHE_POLICY
 from .config import get_settings
@@ -35,7 +36,7 @@ logging.basicConfig(level=logging.INFO, format="%(message)s")
 
 
 def log(event: str, **fields) -> None:
-    payload = {"event": event, **fields}
+    payload = {"event": event, **edge_guardrails.mask_log(fields)}
     logger.info(json.dumps(payload, default=str) if settings.log_json else f"{event} {fields}")
 
 
@@ -60,6 +61,8 @@ def validate_runtime_security(runtime_settings) -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     validate_runtime_security(settings)
+    # Antes de criar qualquer client: os instrumentadores precisam existir na importação deles.
+    trace_sink = observability.setup_tracing(settings.app_name)
     store = DataStore(settings)
     await store.connect()
     set_store(store)
@@ -77,7 +80,9 @@ async def lifespan(app: FastAPI):
                                      cooldown_minutes=settings.warmup_cooldown_minutes)
     if settings.warmup_on_start:
         app.state.warmup.trigger()  # a demo já nasce aquecida; a UI dispara de novo quando abre (respeita o cooldown)
-    log("startup", storage="memory" if store.memory else "mongodb_atlas")
+    log("startup", storage="memory" if store.memory else "mongodb_atlas", trace_sink=trace_sink,
+        supervisor_strict=resilience.supervisor_strict(), tool_breaker=resilience.tool_breaker_enabled(),
+        edge_guardrails=edge_guardrails.enabled())
     yield
     with suppress(Exception):
         if app.state.warmup._task:
@@ -138,19 +143,45 @@ async def create_token(payload: TokenRequest, store: DataStore = Depends(get_sto
     return {"access_token": issue_token(customer["customer_key"], settings), "token_type": "bearer", "customer": {key: customer[key] for key in ("customer_key", "name", "area", "plan")}}
 
 
+def _degraded_turn(payload: ChatRequest, customer: dict, reason: str) -> ChatResponse:
+    """Degradação graciosa no topo: o turno falhou, mas o cliente recebe estado explícito (200),
+    nunca um 500 mudo. Só com SUPERVISOR_STRICT=1; sem a flag o comportamento é o de sempre."""
+    return ChatResponse(
+        conversation_id=payload.conversation_id or f"conv-{uuid.uuid4().hex[:12]}",
+        response=resilience.degraded_reply("atendimento"),
+        active_agent="supervisor", route_source="fallback", cache_hit=False,
+        timeline=[], usage={}, suggestions=[],
+        llm_calls=[], economics={}, degraded=True, degraded_reason=reason,
+    )
+
+
 @app.post("/api/chat", response_model=ChatResponse)
 async def chat(request: Request, payload: ChatRequest, customer: Annotated[dict, Depends(current_customer)]):
     if not limiter.allow(request_identity_key(request, customer["customer_key"])):
         raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "limite de requisições excedido")
     async with metrics.track_route("chat"):
-        try:
-            return await asyncio.wait_for(
-                request.app.state.orchestrator.run_turn(payload.message, customer, payload.conversation_id),
-                timeout=settings.turn_deadline_seconds,
-            )
-        except TimeoutError as exc:
-            await metrics.increment("turns.deadline_exceeded")
-            raise HTTPException(status.HTTP_504_GATEWAY_TIMEOUT, "deadline global do turno excedido") from exc
+        with observability.span("turn", conversation_id=payload.conversation_id or "novo",
+                                customer_key=customer["customer_key"], area=customer["area"]):
+            try:
+                response = await asyncio.wait_for(
+                    request.app.state.orchestrator.run_turn(payload.message, customer, payload.conversation_id),
+                    timeout=settings.turn_deadline_seconds,
+                )
+            except TimeoutError as exc:
+                await metrics.increment("turns.deadline_exceeded")
+                if resilience.supervisor_strict():
+                    return _degraded_turn(payload, customer, "deadline global do turno excedido")
+                raise HTTPException(status.HTTP_504_GATEWAY_TIMEOUT, "deadline global do turno excedido") from exc
+            except (BudgetExceeded, HTTPException):
+                raise
+            except Exception as exc:  # noqa: BLE001 — com supervisor estrito, falha não vira 500 mudo
+                if not resilience.supervisor_strict():
+                    raise
+                await metrics.increment("turns.degraded")
+                log("turn_degraded", error=type(exc).__name__, customer_key=customer["customer_key"])
+                return _degraded_turn(payload, customer, type(exc).__name__)
+            edge_guardrails.validate_response(ChatResponse, response)
+            return response
 
 
 @app.post("/api/warmup")
